@@ -1,0 +1,10 @@
+.Rhistory
+.RData
+.Rproj.user/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Large or temporary files
+*.tmp
+*.log
