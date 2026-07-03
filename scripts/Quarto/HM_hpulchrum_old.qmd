@@ -1,0 +1,2570 @@
+---
+title: "HM_hpulchrum_old"
+format: html
+editor: visual
+---
+
+# RADseq Analysis Workflow
+
+## **1 Demultiplexing and Cleaning**
+
+Script: /scratch/PNeuhaus/PaulaNeuhaus/Scripts/demultiplexing_old_hpu.sh
+
+``` bash
+#!/usr/bin/env bash
+
+#SBATCH --job-name=demux_HM
+#SBATCH --time=30:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=400G
+#SBATCH --account=ag-demeaux
+#SBATCH --mail-type=END,FAIL
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/logs/%x_%j.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/logs/%x_%j.err
+
+# ============================================================
+# PURPOSE
+# ============================================================
+# This pipeline:
+#
+# 1. Trims the 5 bp spacer from R1 only
+# 2. Demultiplexes reads using process_radtags
+# 3. Optionally removes PCR duplicates AFTER demultiplexing
+#
+# Library structure identified:
+#
+#   NNNNN + BARCODE + GGTACC + genomic DNA
+#
+# where:
+#   NNNNN = diversity spacer (5 bp)
+#   BARCODE = inline barcode (6 bp)
+#   GGTACC = KpnI restriction site
+#
+# ============================================================
+
+set -euo pipefail
+shopt -s nullglob
+
+# ============================================================
+# LOAD MODULES
+# ============================================================
+
+module purge
+
+module load bio/Stacks/2.62-foss-2022a
+module load bio/cutadapt/4.2-GCCcore-11.3.0
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+THREADS=8
+
+FASTQ_DIR="/scratch/RADseq_ag-deamux/NGS_24D324"
+OUTROOT="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old"
+mkdir -p "$OUTROOT"
+
+BARCODE_FILE="$FASTQ_DIR/barcodes_pool4.txt"
+
+R1="$FASTQ_DIR/DX166_303714_24D324-4_S56_L000_R1_001.fastq.gz"
+R2="$FASTQ_DIR/DX166_303714_24D324-4_S56_L000_R2_001.fastq.gz"
+
+ENZYME="kpnI"
+
+# process_radtags options
+INLINE_FLAG="--inline_null"
+BARCODE_MISMATCH="--barcode-dist-1 1"
+
+# ============================================================
+# OUTPUT DIRECTORIES
+# ============================================================
+
+LOG_DIR="$OUTROOT/logs"
+TRIM_DIR="$OUTROOT/trimmed"
+RAD_DIR="$OUTROOT/radtags"
+DUP_DIR="$OUTROOT/clone_filtered"
+
+mkdir -p \
+    "$LOG_DIR" \
+    "$TRIM_DIR" \
+    "$RAD_DIR" \
+    "$DUP_DIR"
+
+# ============================================================
+# CHECK INPUT FILES
+# ============================================================
+
+if [[ ! -f "$R1" ]]; then
+    echo "ERROR: R1 file not found"
+    exit 1
+fi
+
+if [[ ! -f "$R2" ]]; then
+    echo "ERROR: R2 file not found"
+    exit 1
+fi
+
+if [[ ! -f "$BARCODE_FILE" ]]; then
+    echo "ERROR: Barcode file not found"
+    exit 1
+fi
+
+echo "=================================================="
+echo "JOB STARTED: $(date)"
+echo "HOSTNAME: $(hostname)"
+echo "=================================================="
+
+# ============================================================
+# STEP 1 — TRIM 5 bp SPACER FROM R1 ONLY
+# ============================================================
+#
+# Your data show:
+#
+#   position 6 = barcode
+#   position 12 = GGTACC
+#
+# meaning:
+#
+#   5 bp spacer + 6 bp barcode + restriction site
+#
+# We therefore remove first 5 bp from R1 only.
+#
+# R2 remains untouched.
+#
+# ============================================================
+
+echo "=================================================="
+echo "STEP 1: TRIMMING R1 SPACER"
+echo "=================================================="
+
+TRIM_R1="$TRIM_DIR/trimmed_R1.fastq.gz"
+TRIM_R2="$TRIM_DIR/trimmed_R2.fastq.gz"
+
+cutadapt \
+    -u 5 \
+    -o "$TRIM_R1" \
+    -p "$TRIM_R2" \
+    "$R1" \
+    "$R2" \
+    > "$LOG_DIR/cutadapt.log" 2>&1
+
+echo "Spacer trimming completed"
+
+# ============================================================
+# STEP 2 — DEMULTIPLEX WITH process_radtags
+# ============================================================
+
+echo "=================================================="
+echo "STEP 2: process_radtags"
+echo "=================================================="
+
+process_radtags \
+    -1 "$TRIM_R1" \
+    -2 "$TRIM_R2" \
+    -o "$RAD_DIR" \
+    -b "$BARCODE_FILE" \
+    -e "$ENZYME" \
+    $INLINE_FLAG \
+    $BARCODE_MISMATCH \
+    -r -c -q \
+    -i gzfastq \
+    -T "$THREADS" \
+    -D \
+    > "$LOG_DIR/process_radtags.log" 2>&1
+
+echo "process_radtags completed"
+
+# ============================================================
+# STEP 3 — OPTIONAL PCR DUPLICATE REMOVAL
+# ============================================================
+#
+# This is performed AFTER demultiplexing,
+# which is the biologically cleaner workflow.
+#
+# ============================================================
+
+echo "=================================================="
+echo "STEP 3: clone_filter"
+echo "=================================================="
+
+DEMUX_R1=("$RAD_DIR"/*.1.fq.gz)
+
+if [[ ${#DEMUX_R1[@]} -eq 0 ]]; then
+    echo "ERROR: No demultiplexed files found"
+    exit 1
+fi
+
+for r1_file in "${DEMUX_R1[@]}"; do
+
+    sample=$(basename "$r1_file" .1.fq.gz)
+
+    r2_file="$RAD_DIR/${sample}.2.fq.gz"
+
+    if [[ ! -f "$r2_file" ]]; then
+        echo "WARNING: Missing R2 for sample $sample"
+        continue
+    fi
+
+    sample_out="$DUP_DIR/$sample"
+
+    mkdir -p "$sample_out"
+
+    echo "Processing clone_filter for sample: $sample"
+
+    clone_filter \
+        -1 "$r1_file" \
+        -2 "$r2_file" \
+        -o "$sample_out" \
+        -i gzfastq \
+        --oligo-len-1 6 \
+        -y gzfastq \
+        > "$sample_out/clone_filter.log" 2>&1
+done
+
+echo "=================================================="
+echo "PIPELINE FINISHED SUCCESSFULLY"
+echo "DATE: $(date)"
+echo "=================================================="
+```
+
+## 2 Quality Control and Read Distribution Analysis
+
+#### Summarising TSV
+
+``` bash
+{bash}
+# Extract the per_barcode_raw_read_counts section and create a TSV
+sed -n '/BEGIN per_barcode_raw_read_counts/,/END per_barcode_raw_read_counts/p' /scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/radtags/process_radtags.trimmed.log | \
+grep -v "BEGIN\|END" > /scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/radtags/per_sample_counts.tsv
+```
+
+After that, make the figures for the Proportion of Library, Retained Reads (M) and Proportion of Retained Reads
+
+#### Plotting
+
+``` r
+{r}
+
+#!/usr/bin/env Rscript
+
+# Plot Stacks-Process Radtags per-sample statistics
+
+## Input data
+
+### Path to output PDFs
+pdfPath = '/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/pdf'
+
+### Path to `per_sample_counts.tsv` file
+procRadtagsLogPath = '/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/radtags/per_sample_counts.tsv'
+
+### Open the file as a dataframe
+processRadtags = read.delim(procRadtagsLogPath)
+
+### Check column names
+print(colnames(processRadtags))  # Optional debug
+
+### Add the population identifier (extract it from the sample names)
+processRadtags$PopID <- sapply(strsplit(processRadtags$Filename, '_'),
+                               function(x){x[2]})
+
+## Calculate overall statistics
+totalReads <- sum(processRadtags$Total)
+totalRetained <- sum(processRadtags$Retained.Reads)
+percRetained <- totalRetained / totalReads
+
+## Plots
+
+### Initialize PDF
+pdf(paste0(pdfPath, '/process_radtags_stats.pdf'), width=8, height=8)
+
+### A. Proportion of Library
+
+#### Calculate percentage of total reads
+processRadtags$PercTotal <- processRadtags$Total / totalReads
+summary(processRadtags$PercTotal)
+sd(processRadtags$PercTotal)
+
+#### Sort the dataframe by the percent total
+processRadtags <- processRadtags[order(processRadtags$PercTotal),]
+
+#### Plot dotchart
+dotchart(processRadtags$PercTotal,
+         labels = processRadtags$Filename,
+         xlab='',
+         xlim=c(0,0.08))
+title(xlab='Proportion of Library', line=2)
+abline(v=mean(processRadtags$PercTotal), lty=2, col='#b22222')
+
+#### Per-population Boxplot
+boxplot(PercTotal~PopID, data=processRadtags,
+        las=1,
+        xlab='',
+        ylab='',
+        col=c("#E69F00", "#56B4E9"),
+        horizontal = TRUE,
+        ylim=c(0,0.08))
+title(xlab='Proportion of Library', line=2)
+title(ylab='Population', line=2)
+
+### B. Reads per-sample
+
+#### Stats
+summary(processRadtags$Retained.Reads)
+sd(processRadtags$Retained.Reads)
+
+#### Sort
+processRadtags <- processRadtags[order(processRadtags$Retained.Reads),]
+
+#### Dotchart
+dotchart(processRadtags$Retained.Reads / 1e6,
+         labels = processRadtags$Filename,
+         xlab='',
+         xlim=c(0, max(processRadtags$Retained.Reads) / 1e6))
+title(xlab='Retained Reads (M)', line=2)
+abline(v=mean(processRadtags$Retained.Reads / 1e6), lty=2, col='#b22222')
+
+#### Per-population boxplot
+par(mar=c(3,3,0.5,0.5) + 0.1)
+boxplot(Retained.Reads / 1e6 ~ PopID, data=processRadtags,
+        las=1,
+        xlab='',
+        ylab='',
+        col=c("#E69F00", "#56B4E9"),
+        horizontal = TRUE,
+        ylim=c(0, max(processRadtags$Retained.Reads / 1e6)))
+title(xlab='Retained Reads (M)', line=2)
+title(ylab='Population', line=2)
+
+### C. Percent retained
+
+#### Calculate percent retained
+processRadtags$PercRetained <- processRadtags$Retained.Reads / processRadtags$Total
+summary(processRadtags$PercRetained)
+sd(processRadtags$PercRetained)
+
+#### Sort
+processRadtags <- processRadtags[order(processRadtags$PercRetained),]
+
+#### Dotchart
+dotchart(processRadtags$PercRetained,
+         labels = processRadtags$Filename,
+         xlab='',
+         xlim=c(0.4,1))
+title(xlab='Proportion of Retained Reads', line=2)
+abline(v=mean(processRadtags$PercRetained), lty=2, col='#b22222')
+
+#### Per-population Boxplot
+boxplot(PercRetained~PopID, data=processRadtags,
+        las=1,
+        xlab='',
+        ylab='',
+        col=c("#E69F00", "#56B4E9"),
+        horizontal = TRUE,
+        ylim=c(0.4,1))
+title(xlab='Proportion of Retained Reads', line=2)
+title(ylab='Population', line=2)
+
+### Close PDF
+dev.off()
+```
+
+**After finishing:** Download the PDF from the HPC onto your own computer
+
+``` bash
+scp pneuhau2@ramses4.itcc.uni-koeln.de:/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/pdf/process_radtags_stats.pdf /home/alle/Downloads/Paula
+```
+
+## 3 FastP
+
+This was done with the process_radtags files
+
+Script: fastp_old_hmhpu.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=fastp_HM
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
+#SBATCH --time=02:00:00
+#SBATCH --array=1-20
+#SBATCH --account=ag-demeaux
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/logs/%x_%A_%a.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/logs/%x_%A_%a.err
+
+# --------------------
+# Directories
+# --------------------
+INDIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/radtags"
+OUTDIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/fastp"
+mkdir -p "$OUTDIR"
+
+# --------------------
+# Build sample list from forward reads
+# --------------------
+SAMPLE_LIST=($(ls ${INDIR}/*.1.fq.gz | grep -v '\.rem' | xargs -n1 basename | sed 's/\.1\.fq\.gz//'))
+SAMPLE=${SAMPLE_LIST[$SLURM_ARRAY_TASK_ID-1]}
+
+# --------------------
+# Input files
+# --------------------
+FQ1=${INDIR}/${SAMPLE}.1.fq.gz
+FQ2=${INDIR}/${SAMPLE}.2.fq.gz
+
+# --------------------
+# Output files
+# --------------------
+OUT1=${OUTDIR}/${SAMPLE}_R1.fastp.fq.gz
+OUT2=${OUTDIR}/${SAMPLE}_R2.fastp.fq.gz
+HTML=${OUTDIR}/${SAMPLE}.fastp.html
+JSON=${OUTDIR}/${SAMPLE}.fastp.json
+
+# --------------------
+# Run FastP
+# --------------------
+fastp \
+  -i "$FQ1" \
+  -I "$FQ2" \
+  -o "$OUT1" \
+  -O "$OUT2" \
+  --detect_adapter_for_pe \
+  --thread $SLURM_CPUS_PER_TASK \
+  --qualified_quality_phred 20 \
+  --length_required 50 \
+  --dedup \
+  --html "$HTML" \
+  --json "$JSON"
+```
+
+``` bash
+module load bio/MultiQC
+multiqc . -o fastp_summary
+```
+
+## 4 FastQC
+
+Doing a FastQC on the clone_filtered
+
+Script: fastqc_clone_old.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=fastqc_clone_old
+#SBATCH --nodes=1
+#SBATCH --time=2:00:00
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16gb
+#SBATCH --account=ag-demeaux
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/logs/%x_%j.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/logs/%x_%j.err
+
+module purge
+module load bio/FastQC
+
+BASE_DIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/clone_filtered"
+OUT_DIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/clone_filtered/fastqc"
+mkdir -p "$OUT_DIR"
+
+for SAMPLE_DIR in "$BASE_DIR"/*; do
+    # Only directories, skip *.rem
+    if [[ -d "$SAMPLE_DIR" ]] && [[ "$SAMPLE_DIR" != *.rem ]]; then
+        echo "Processing directory: $SAMPLE_DIR"
+        
+        # Run FastQC on all .fq.gz files inside
+        for FQ in "$SAMPLE_DIR"/*.fq.gz; do
+            # Check if files exist
+            if [[ -f "$FQ" ]]; then
+                echo "  Running FastQC on $FQ"
+                fastqc -t 4 -o "$OUT_DIR" "$FQ"
+            fi
+        done
+    fi
+done
+```
+
+``` bash
+module avail multiqc
+module load bio/MultiQC
+multiqc . -o ./multiqc_clone_old
+```
+
+## 5 Mapping
+
+Mapping of the reads from FastP to the reference genome of *Hypericum pulchrum*
+
+Script: mapping_old_hm_hpu.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=map_old_hm_hpu
+#SBATCH --nodes=1
+#SBATCH --time=1:00:00
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=32gb
+#SBATCH --account=ag-demeaux
+#SBATCH --array=1-20
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/logs/%x_%A_%a.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/logs/%x_%A_%a.err
+
+# Directories
+INDIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/fastp/"
+OUTDIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/mapping"
+REF="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/ref_genomes/HM/hypericumpulchrum/hypericumpulchrum_SAMEA10241452.fasta"
+
+# Create output directory if needed
+mkdir -p $OUTDIR
+
+# Make the sample list, if not already done
+# ls *_HM_*_R*.fastp.fq.gz | sed -E 's/_R[12].fastp\.fq.gz//' > sample_list_HM.txt
+# This list’s only purpose is to have an easy way to get the correct files for the species you’re using.
+
+# Use the sample list
+SAMPLE=$(sed -n "${SLURM_ARRAY_TASK_ID}p" ${INDIR}/sample_list_HM.txt)
+
+FQ1=${INDIR}/${SAMPLE}_R1.fastp.fq.gz
+FQ2=${INDIR}/${SAMPLE}_R2.fastp.fq.gz
+
+BAM=${OUTDIR}/${SAMPLE}.sorted.bam
+
+echo "Mapping sample: $SAMPLE"
+echo "FQ1: $FQ1"
+echo "FQ2: $FQ2"
+echo "Output BAM: $BAM"
+
+module purge
+module load bio/bwa-mem2/2.2.1-intel-compilers-2023.1.0
+module load bio/SAMtools/1.18-GCC-12.3.0
+
+bwa-mem2 mem -t $SLURM_CPUS_PER_TASK $REF $FQ1 $FQ2 | \
+    samtools view -bS - | \
+    samtools sort -@ $SLURM_CPUS_PER_TASK -o $BAM -
+
+samtools index $BAM
+```
+
+## 6 Deduplication of Mapped Reads
+
+dedup_HM.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=dedup_hm_old
+#SBATCH --nodes=1
+#SBATCH --time=2:00:00
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=24gb
+#SBATCH --account=ag-demeaux
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/logs/%x_%j_%a.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/logs/%x_%j_%a.err
+#SBATCH --array=1-51
+
+module purge
+module load bio/SAMtools/1.18-GCC-12.3.0
+
+INLIST="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/fastp/sample_list_HM.txt"
+INDIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/mapping"
+OUTDIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/mapping/dedup"
+
+mkdir -p $OUTDIR
+
+# Get sample name
+SAMPLE=$(sed -n "${SLURM_ARRAY_TASK_ID}p" ${INLIST})
+
+echo "Processing $SAMPLE"
+
+# Input BAM
+INBAM=${INDIR}/${SAMPLE}.sorted.bam
+
+# Intermediate + final BAMs
+NAME_SORT=${OUTDIR}/${SAMPLE}_name_sorted.bam
+FIXMATE=${OUTDIR}/${SAMPLE}_fixmate.bam
+FIXMATE_SORT=${OUTDIR}/${SAMPLE}_fixmate_sorted.bam
+DEDUP=${OUTDIR}/${SAMPLE}_sorted_dedup.bam
+STATS=${OUTDIR}/${SAMPLE}_duplicates_report.txt
+
+# Step 1: sort by name
+samtools sort -n -@ 6 -O bam -o $NAME_SORT $INBAM
+
+# Step 2: fixmate
+samtools fixmate -m -O bam $NAME_SORT $FIXMATE
+rm -f $NAME_SORT
+
+# Step 3: coordinate sort
+samtools sort -@ 6 -O bam -o $FIXMATE_SORT $FIXMATE
+rm -f $FIXMATE
+
+# Step 4: mark duplicates (remove them with -r, keep stats with -s)
+samtools markdup -r -s -@ 6 $FIXMATE_SORT $DEDUP
+rm -f $FIXMATE_SORT
+
+# Step 5: stats summary
+samtools flagstat $DEDUP > $STATS
+
+samtools index $DEDUP
+
+echo "Finished $SAMPLE"
+```
+
+## 7 (Multi)BamQC
+
+Run the following for all the sorted.bam files after deduplication.
+
+``` bash
+for bam in *_sorted_dedup.bam; 
+do
+  sample=${bam%_sorted_dedup.bam}
+
+echo "Processing $sample"
+
+qualimap bamqc \
+  --java-mem-size=8G \
+  -bam "$bam" \
+  -outdir "bamqc/$sample" \
+  -outformat HTML
+done
+```
+
+Run MultiBamQC for all samples
+
+Script: multibamqc_hm_old.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=multibamqc_hm_old
+#SBATCH --time=0:15:00
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8gb
+#SBATCH --account=ag-demeaux
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/logs/%x_%A.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/logs/%x_%A.err
+
+set -euo pipefail
+
+# CORRECTED PATH: Points exactly to where you ran 'ls'
+BAMQC_DIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/mapping/dedup/bamqc"
+MULTIBAMQC_DIR="$BAMQC_DIR/multibamqc"
+INPUT_GROUPS_FILE="$BAMQC_DIR/input_groups.txt"
+
+# Create the final summary directory if it doesn't exist
+mkdir -p "$MULTIBAMQC_DIR"
+rm -f "$INPUT_GROUPS_FILE"
+
+echo "Locating existing BAMQC reports and creating input groups file..."
+
+# Loop through your existing folders (like 216_HM_10, 271_HM_3, etc.)
+for PATH_DIR in "$BAMQC_DIR"/*; do
+    # Verify it's a directory, ignore the target output folder, and confirm genome_results.txt exists
+    if [ -d "$PATH_DIR" ] && [ "$(basename "$PATH_DIR")" != "multibamqc" ] && [ -f "$PATH_DIR/genome_results.txt" ]; then
+        NAME=$(basename "$PATH_DIR")
+        echo -e "${NAME}\t${PATH_DIR}\t1" >> "$INPUT_GROUPS_FILE"
+    fi
+done
+
+echo "Running Qualimap Multi-BAMQC on existing data..."
+export JAVA_OPTS="-Djava.awt.headless=true"
+
+qualimap multi-bamqc \
+    -d "$INPUT_GROUPS_FILE" \
+    -outdir "$MULTIBAMQC_DIR" \
+    -outformat PDF:HTML \
+    -nw 400
+
+echo "Qualimap Multi-BAMQC summary report generation complete!"
+```
+
+## 8 VCF Calling
+
+Doing VCF calling for old and new data joined
+
+Script: vcf_calling_HM.sh
+
+``` bash
+#!/bin/bash
+
+#SBATCH --job-name=vcf_calling
+#SBATCH --time=10:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64gb
+#SBATCH --account=ag-demeaux
+#SBATCH --mail-type=END,FAIL
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/logs/%x_%j.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/logs/%x_%j.err
+
+set -euo pipefail
+
+module purge
+module load bio/BCFtools/1.19-GCC-13.2.0
+
+# Set paths
+# Referencegenome
+REF="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/ref_genomes/HM/hypericumpulchrum/hypericumpulchrum_SAMEA10241452.fasta"
+
+BAMLIST_OLD="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/old/mapping/dedup/bam_file_paths_sorted_old.txt"
+BAMLIST_NEW="/scratch/PNeuhaus/PaulaNeuhaus/Output/duprem/HM/new/mapping/dedup/bam_file_paths_sorted_new.txt"
+BAMLIST="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/bamlist.txt"
+
+cat "$BAMLIST_OLD" "$BAMLIST_NEW" > "$BAMLIST"
+
+echo "Combined BAM count: $(wc -l < "$BAMLIST")" >> $SLURM_JOB_ID.vcf.log
+
+OUTDIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM"
+
+OUT="${OUTDIR}/AlandIslandsHM.vcf.gz"
+
+mkdir -p "$OUTDIR"
+
+# Print job info to log file
+echo "Starting variant calling with bcftools" > $SLURM_JOB_ID.vcf.log
+echo "Reference Genome: $REF" >> $SLURM_JOB_ID.vcf.log
+echo "BAM list: $BAMLIST" >> $SLURM_JOB_ID.vcf.log
+echo "Output VCF: $OUT" >> $SLURM_JOB_ID.vcf.log
+echo "Start time: $(date)" >> $SLURM_JOB_ID.vcf.log
+
+bcftools mpileup \
+-f "$REF" \
+-b "$BAMLIST" \
+-q 20 \
+-Q 30 \
+-a AD,DP,SP \
+-Ou \
+| bcftools call \
+-m -v \
+-a GQ,GP \
+-Oz \
+-o "$OUT"
+
+bcftools index "$OUT"
+
+echo "End time: $(date)" >> $SLURM_JOB_ID.vcf.log
+```
+
+## 9 Pre-Visualisation
+
+After this, I did the pre-visualisation for the data to be able to make the patchwork plots for the VCF file.
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=vcftools_stats
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8gb
+#SBATCH --time=01:00:00
+#SBATCH --account=ag-demeaux
+#SBATCH --mail-type=END,FAIL
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/logs/%x_%j.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/logs/%x_%j.err
+
+set -euo pipefail
+
+# Load module
+module purge
+module load bio/VCFtools/0.1.16-GCC-11.3.0
+
+# Make variables
+SET_VCF="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/AlandIslandsHM.vcf.gz"
+OUT="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+mkdir -p "$OUT"
+
+echo "Starting VCFtools statistics"
+echo "VCF: $SET_VCF"
+echo "Output directory: $OUT"
+
+# Calculate the allele frequency
+vcftools --gzvcf $SET_VCF --freq2 --out $OUT --max-alleles 2
+
+# Calculate the mean depth per individual
+vcftools --gzvcf $SET_VCF --depth --out $OUT
+
+# Calculate the mean depth per site
+vcftools --gzvcf $SET_VCF --site-mean-depth --out $OUT
+
+# Calculate the site quality
+vcftools --gzvcf $SET_VCF --site-quality --out $OUT
+
+# Calculate the proportion of missing data per individual
+vcftools --gzvcf $SET_VCF --missing-indv --out $OUT
+
+# Calculate proportion of missing data per site
+vcftools --gzvcf $SET_VCF --missing-site --out $OUT
+
+# Calculate the heterozygosity and inbreeding coefficient per individual
+vcftools --gzvcf $SET_VCF --het --out $OUT
+```
+
+## 10 Visualisation and Patchwork plots
+
+``` r
+install.packages("tidyverse")
+library(tidyverse)
+library(ggplot2)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read tab files with header + 1 header line to skip
+read_tab <- function(path, col_names) {
+vroom::vroom(path, delim = "\t", skip = 1, col_names = col_names, show_col_types = FALSE)
+}
+
+# --- Read files ---
+var_qual <- read_tab(file.path(base, "vcftools.lqual"),
+c("CHROM","POS","QUAL"))
+
+var_depth <- read_tab(file.path(base, "vcftools.ldepth.mean"),
+c("CHROM","POS","MEAN_DEPTH","VAR_DEPTH"))
+
+var_miss <- read_tab(file.path(base, "vcftools.lmiss"),
+c("CHR","POS","N_DATA","N_GENOTYPE_FILTERED","N_MISS","F_MISS"))
+
+# --freq2 prints allele:freq; parse the numeric frequencies correctly
+var_freq_raw <- read_tab(file.path(base, "vcftools.frq"),
+c("CHR","POS","N_ALLELES","N_CHR","a1","a2"))
+parse_freq <- function(x) readr::parse_number(sub(".*:", "", x))
+var_freq <- var_freq_raw %>%
+mutate(freq1 = parse_freq(a1),
+freq2 = parse_freq(a2),
+maf = pmin(freq1, freq2, na.rm = TRUE))
+
+ind_depth <- read_tab(file.path(base, "vcftools.idepth"),
+c("INDV","N_SITES","MEAN_DEPTH"))
+
+ind_miss <- read_tab(file.path(base, "vcftools.imiss"),
+c("INDV","N_DATA","N_GENOTYPES_FILTERED","N_MISS","F_MISS"))
+
+ind_het <- read_tab(file.path(base, "vcftools.het"),
+c("INDV","O(HOM)","E(HOM)","N_SITES","F")) # F ~ inbreeding coefficient
+
+write.csv(var_qual, file.path(base, "var_qual_output.csv"))
+write.csv(var_depth, file.path(base, "var_depth_output.csv"))
+write.csv(var_miss, file.path(base, "var_miss_output.csv"))
+write.csv(var_freq, file.path(base, "var_freq_output.csv"))
+write.csv(ind_depth, file.path(base, "ind_depth_output.csv"))
+write.csv(ind_miss, file.path(base, "ind_miss_output.csv"))
+write.csv(ind_het, file.path(base, "ind_het_output.csv"))
+
+# Patchwork Plot
+
+library(ggplot2)
+library(patchwork)
+
+# Define file paths
+base <-  "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output.csv"))
+
+# Quick sanity: confirm the data frames exist & have rows
+for (nm in c("var_qual","var_depth","var_miss","var_freq","ind_depth","ind_miss","ind_het")) {
+if (!exists(nm)) stop(sprintf("Object '%s' does not exist (check file paths in qc-setup).", nm))
+if (!is.data.frame(get(nm)) || nrow(get(nm)) == 0) stop(sprintf("Object '%s' has 0 rows.", nm))
+}
+
+# Create plots for each dataset
+p1 <- ggplot(var_qual, aes(QUAL)) +
+geom_density(alpha = .3) +
+coord_cartesian(xlim = c(0, 800)) +
+theme_light() +
+labs(title = "Variant Quality")
+
+p2 <- ggplot(var_depth, aes(MEAN_DEPTH)) +
+geom_density(alpha = .3) +
+coord_cartesian(xlim = c(0, 75)) +
+theme_light() +
+labs(title = "Variant Depth (mean)")
+
+p3 <- ggplot(var_miss, aes(F_MISS)) +
+geom_density(alpha = .3) +
+theme_light() +
+labs(title = "Variant Missingness (fmiss)")
+
+p4 <- ggplot(var_freq, aes(maf)) +
+geom_density(alpha = .3) +
+theme_light() +
+labs(title = "Minor Allele Frequency (MAF)")
+
+p5 <- ggplot(ind_depth, aes(MEAN_DEPTH)) +
+geom_histogram(bins = 50, alpha = .3) +
+theme_light() +
+labs(title = "Individual Depth")
+
+p6 <- ggplot(ind_miss, aes(F_MISS)) +
+geom_histogram(bins = 50, alpha = .3) +
+theme_light() +
+labs(title = "Individual Missingness")
+
+p7 <- ggplot(ind_het, aes(F)) +
+geom_histogram(bins = 50, alpha = .3) +
+theme_light() +
+labs(title = "Individual Inbreeding (F)")
+
+# Compose robustly (avoids relying on | and / operators)
+panel <- patchwork::wrap_plots(list(p1, p2, p3, p4, p5, p6, p7), ncol = 2, guides = "collect")
+
+
+#save panel as pdf file
+ggsave( "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_raw_stats.pdf", panel, width = 10, height = 14)
+```
+
+## 11 Summary TSV of Raw VCF Stats
+
+``` r
+library(dplyr)
+library(tibble)
+library(purrr)
+library(readr)
+library(knitr)
+
+# Helper function to compute full summary stats for a numeric vector
+summ <- function(x) {
+  tibble(
+    n      = sum(!is.na(x)),
+    min    = min(x, na.rm = TRUE),
+    q1     = quantile(x, 0.25, na.rm = TRUE),
+    median = median(x, na.rm = TRUE),
+    mean   = mean(x, na.rm = TRUE),
+    q3     = quantile(x, 0.75, na.rm = TRUE),
+    max    = max(x, na.rm = TRUE),
+    sd     = sd(x, na.rm = TRUE)
+  )
+}
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output.csv"))
+
+# Build summary for each dataset
+qc_full_summary <- bind_rows(
+  summ(var_qual$QUAL)         |> mutate(metric = "Variant Quality (QUAL)"),
+  summ(var_depth$MEAN_DEPTH)  |> mutate(metric = "Variant Depth (mean)"),
+  summ(var_miss$F_MISS)       |> mutate(metric = "Variant Missingness (fmiss)"),
+  summ(var_freq$maf)          |> mutate(metric = "Minor Allele Frequency (MAF)"),
+  summ(ind_depth$MEAN_DEPTH)  |> mutate(metric = "Individual Depth"),
+  summ(ind_miss$F_MISS)       |> mutate(metric = "Individual Missingness"),
+  summ(ind_het$F)             |> mutate(metric = "Inbreeding (F)")
+) |> 
+  relocate(metric)
+
+
+#save qc summary as tsv file
+write_tsv(qc_full_summary, file = "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_raw_stats_summary.tsv")
+qc_full_summary
+
+qc_full_summary <- read_tsv(
+  "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_raw_stats_summary.tsv"
+)
+
+# Rows: 7 Columns: 9
+# ── Column specification ────────────────────────────────────────────────────────
+# Delimiter: "\t"
+# chr (1): metric
+# dbl (8): n, min, q1, median, mean, q3, max, sd
+
+# ℹ Use `spec()` to retrieve the full column specification for this data.
+# ℹ Specify the column types or set `show_col_types = FALSE` to quiet this message.
+
+kable(qc_full_summary, caption = "Summary statistics for raw VCF")
+```
+
+## 12 Filtering
+
+### Filtering by Site 1st
+
+Script: filt_site1.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=filt_site1
+#SBATCH --nodes=1
+#SBATCH --time=2:00:00
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=24gb
+#SBATCH --account=ag-demeaux
+#SBATCH --mail-type=END,FAIL
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/logs/%j_%x.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/logs/%j_%x.err
+
+module purge
+module load bio/VCFtools
+
+vcftools    --gzvcf /scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/AlandIslandsHM.vcf.gz \
+    --recode-INFO-all \
+    --mac 3 \
+    --max-alleles 2 \
+    --max-meanDP 50 \
+    --min-alleles 2 \
+    --min-meanDP 8 \
+    --minQ 30 \
+    --max-missing 0.7 \
+    --out /scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss70 \
+    --recode \
+    --remove-indels
+
+# Now rerunning the vcftools stats
+
+# Make variables
+SET_VCF="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss70.recode.vcf" 
+
+OUT="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss70" # This defines the output
+
+# Calculate the allele frequency
+vcftools --vcf $SET_VCF --freq2 --out $OUT --max-alleles 2 
+
+# Calculate the mean depth per individual
+vcftools --vcf $SET_VCF --depth --out $OUT 
+
+# Calculate the mean depth per site
+vcftools --vcf $SET_VCF --site-mean-depth --out $OUT 
+
+# Calculate the site quality
+vcftools --vcf $SET_VCF --site-quality --out $OUT 
+
+# Calculate the proportion of missing data per individual
+vcftools --vcf $SET_VCF --missing-indv --out $OUT 
+
+# Calculate proportion of missing data per site
+vcftools --vcf $SET_VCF --missing-site --out $OUT 
+
+# Calculate the heterozygosity and inbreeding coefficient per individual
+vcftools --vcf $SET_VCF --het --out $OUT 
+```
+
+### Visualisation of VCF Data Filtered by Site 1st
+
+``` r
+# VISUALISATION OF THE FILTERED VCF STATS
+# R Script
+install.packages("tidyverse")
+library(tidyverse)
+library(ggplot2)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read tab files with header + 1 header line to skip
+read_tab <- function(path, col_names) {
+  vroom::vroom(path, delim = "\t", skip = 1, col_names = col_names, show_col_types = FALSE)
+}
+
+# --- Read files ---
+var_qual <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70.lqual"),
+                     c("CHROM","POS","QUAL"))
+
+var_depth <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70.ldepth.mean"),
+                      c("CHROM","POS","MEAN_DEPTH","VAR_DEPTH"))
+
+var_miss <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70.lmiss"),
+                     c("CHR","POS","N_DATA","N_GENOTYPE_FILTERED","N_MISS","F_MISS"))
+
+# --freq2 prints allele:freq; parse the numeric frequencies correctly
+var_freq_filtered <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70.frq"),
+                         c("CHR","POS","N_ALLELES","N_CHR","a1","a2"))
+
+parse_freq <- function(x) readr::parse_number(sub(".*:", "", x))
+
+var_freq <- var_freq_filtered %>%
+  mutate(freq1 = parse_freq(a1),
+         freq2 = parse_freq(a2),
+         maf   = pmin(freq1, freq2, na.rm = TRUE))
+
+ind_depth <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70.idepth"),
+                      c("INDV","N_SITES","MEAN_DEPTH"))
+
+ind_miss  <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70.imiss"),
+                      c("INDV","N_DATA","N_GENOTYPES_FILTERED","N_MISS","F_MISS"))
+
+ind_het   <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70.het"),
+                      c("INDV","O(HOM)","E(HOM)","N_SITES","F"))  # F ~ inbreeding coefficient
+                      
+write.csv(var_qual, file.path(base, "var_qual_output_site1.csv"))
+write.csv(var_depth, file.path(base, "var_depth_output_site1.csv"))
+write.csv(var_miss, file.path(base, "var_miss_output_site1.csv"))
+write.csv(var_freq, file.path(base, "var_freq_output_site1.csv"))
+write.csv(ind_depth, file.path(base, "ind_depth_output_site1.csv"))
+write.csv(ind_miss, file.path(base, "ind_miss_output_site1.csv"))
+write.csv(ind_het, file.path(base, "ind_het_output_site1.csv"))  
+
+# PATCHWORK PLOT OF VARIOUS VCF FILTERED STATS
+
+library(ggplot2)
+library(patchwork)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output_site1.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output_site1.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output_site1.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output_site1.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output_site1.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output_site1.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output_site1.csv"))
+
+# Quick sanity: confirm the data frames exist & have rows
+for (nm in c("var_qual","var_depth","var_miss","var_freq","ind_depth","ind_miss","ind_het")) {
+if (!exists(nm)) stop(sprintf("Object '%s' does not exist (check file paths in qc-setup).", nm))
+if (!is.data.frame(get(nm)) || nrow(get(nm)) == 0) stop(sprintf("Object '%s' has 0 rows.", nm))
+}
+
+# Create plots for each dataset
+p1 <- ggplot(var_qual, aes(QUAL)) + 
+  geom_density(alpha = .3) +  
+  theme_light() + 
+  labs(title = "Variant Quality")
+
+p2 <- ggplot(var_depth, aes(MEAN_DEPTH)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Variant Depth (mean)")
+
+p3 <- ggplot(var_miss, aes(F_MISS)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Variant Missingness (fmiss)")
+
+p4 <- ggplot(var_freq, aes(maf)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Minor Allele Frequency (MAF)")
+
+p5 <- ggplot(ind_depth, aes(MEAN_DEPTH)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Depth")
+
+p6 <- ggplot(ind_miss, aes(F_MISS)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Missingness")
+
+p7 <- ggplot(ind_het, aes(F)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Inbreeding (F)")
+
+# Compose robustly (avoids relying on | and / operators)
+panel <- patchwork::wrap_plots(list(p1, p2, p3, p4, p5, p6, p7), ncol = 2, guides = "collect")
+
+
+# Save panel as pdf file
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_site1_stats.pdf", panel, width = 10, height = 14)
+
+# SUMMARY TABLE OF FILTERED VCF STATS
+library(dplyr)
+library(tibble)
+library(purrr)
+library(readr)
+library(knitr)
+
+# Helper function to compute full summary stats for a numeric vector
+summ <- function(x) {
+  tibble(
+    n      = sum(!is.na(x)),
+    min    = min(x, na.rm = TRUE),
+    q1     = quantile(x, 0.25, na.rm = TRUE),
+    median = median(x, na.rm = TRUE),
+    mean   = mean(x, na.rm = TRUE),
+    q3     = quantile(x, 0.75, na.rm = TRUE),
+    max    = max(x, na.rm = TRUE),
+    sd     = sd(x, na.rm = TRUE)
+  )
+}
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output_site1.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output_site1.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output_site1.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output_site1.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output_site1.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output_site1.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output_site1.csv"))
+
+# Build summary for each dataset
+qc_full_summary <- bind_rows(
+  summ(var_qual$QUAL)         |> mutate(metric = "Variant Quality (QUAL)"),
+  summ(var_depth$MEAN_DEPTH)  |> mutate(metric = "Variant Depth (mean)"),
+  summ(var_miss$F_MISS)       |> mutate(metric = "Variant Missingness (fmiss)"),
+  summ(var_freq$maf)          |> mutate(metric = "Minor Allele Frequency (MAF)"),
+  summ(ind_depth$MEAN_DEPTH)       |> mutate(metric = "Individual Depth"),
+  summ(ind_miss$F_MISS)       |> mutate(metric = "Individual Missingness"),
+  summ(ind_het$F)             |> mutate(metric = "Inbreeding (F)")
+) |> 
+  relocate(metric)
+
+
+#save qc summary as tsv file
+write_tsv(qc_full_summary, file = "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_site1_stats_summary.tsv")
+qc_full_summary
+
+qc_full_summary <- read_tsv(
+  "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_site1_stats_summary.tsv"
+)
+
+# Rows: 7 Columns: 9
+# ── Column specification ────────────────────────────────────────────────────────
+# Delimiter: "\t"
+# chr (1): metric
+# dbl (8): n, min, q1, median, mean, q3, max, sd
+
+# ℹ Use `spec()` to retrieve the full column specification for this data.
+# ℹ Specify the column types or set `show_col_types = FALSE` to quiet this message.
+
+kable(qc_full_summary, caption = "Summary statistics for filtered by site VCF")
+```
+
+### Filtering by Individual 2nd
+
+``` r
+# Use the filtered file from the filtering by site
+library(tidyverse)
+high_missing_ids20 <- ind_miss %>%
+  filter(F_MISS > 0.2) %>%
+  arrange(desc(F_MISS))
+# ind_miss was before read into R as a data frame 
+# Save high_missing_ids60 as textfile
+write_tsv(high_missing_ids20, file = "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss70_high_missing_ids20.txt")
+```
+
+``` bash
+tail -n +2 minQ30_biallelic_noINDELS_mac3_maxmiss70_high_missing_ids20.txt | cut -f 2 > high_missing_id_20.txt
+
+vcftools \
+    --vcf minQ30_biallelic_noINDELS_mac3_maxmiss70.recode.vcf \
+    --remove high_missing_id_20.txt  \
+    --recode-INFO-all \
+    --out minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20   \
+    --recode
+```
+
+Script: filt_indv2_HM.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=filt_indv2
+#SBATCH --nodes=1
+#SBATCH --time=2:00:00
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=24gb
+#SBATCH --account=ag-demeaux
+#SBATCH --mail-type=END,FAIL
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/logs/%j_%x.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/logs/%j_%x.err
+
+module purge
+module load bio/VCFtools
+
+# Now rerunning the vcftools stats
+
+# Make variables
+SET_VCF="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.recode.vcf" 
+
+OUT="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20"
+
+# Calculate the allele frequency
+vcftools --vcf $SET_VCF --freq2 --out $OUT --max-alleles 2 
+
+# Calculate the mean depth per individual
+vcftools --vcf $SET_VCF --depth --out $OUT 
+
+# Calculate the mean depth per site
+vcftools --vcf $SET_VCF --site-mean-depth --out $OUT 
+
+# Calculate the site quality
+vcftools --vcf $SET_VCF --site-quality --out $OUT 
+
+# Calculate the proportion of missing data per individual
+vcftools --vcf $SET_VCF --missing-indv --out $OUT 
+
+# Calculate proportion of missing data per site
+vcftools --vcf $SET_VCF --missing-site --out $OUT 
+
+# Calculate the heterozygosity and inbreeding coefficient per individual
+vcftools --vcf $SET_VCF --het --out $OUT 
+```
+
+### Visualisation of VCF Stats Filtered by Individual 2nd
+
+``` r
+# VISUALISATION OF THE FILTERED VCF STATS
+# R Script
+install.packages("tidyverse")
+library(tidyverse)
+library(ggplot2)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read tab files with header + 1 header line to skip
+read_tab <- function(path, col_names) {
+  vroom::vroom(path, delim = "\t", skip = 1, col_names = col_names, show_col_types = FALSE)
+}
+
+# --- Read files ---
+var_qual <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.lqual"),
+                     c("CHROM","POS","QUAL"))
+
+var_depth <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.ldepth.mean"),
+                      c("CHROM","POS","MEAN_DEPTH","VAR_DEPTH"))
+
+var_miss <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.lmiss"),
+                     c("CHR","POS","N_DATA","N_GENOTYPE_FILTERED","N_MISS","F_MISS"))
+
+# --freq2 prints allele:freq; parse the numeric frequencies correctly
+var_freq_filtered <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.frq"),
+                         c("CHR","POS","N_ALLELES","N_CHR","a1","a2"))
+
+parse_freq <- function(x) readr::parse_number(sub(".*:", "", x))
+
+var_freq <- var_freq_filtered %>%
+  mutate(freq1 = parse_freq(a1),
+         freq2 = parse_freq(a2),
+         maf   = pmin(freq1, freq2, na.rm = TRUE))
+
+ind_depth <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.idepth"),
+                      c("INDV","N_SITES","MEAN_DEPTH"))
+
+ind_miss  <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.imiss"),
+                      c("INDV","N_DATA","N_GENOTYPES_FILTERED","N_MISS","F_MISS"))
+
+ind_het   <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.het"),
+                      c("INDV","O(HOM)","E(HOM)","N_SITES","F"))  # F ~ inbreeding coefficient
+                      
+write.csv(var_qual, file.path(base, "var_qual_output_indv2.csv"))
+write.csv(var_depth, file.path(base, "var_depth_output_indv2.csv"))
+write.csv(var_miss, file.path(base, "var_miss_output_indv2.csv"))
+write.csv(var_freq, file.path(base, "var_freq_output_indv2.csv"))
+write.csv(ind_depth, file.path(base, "ind_depth_output_indv2.csv"))
+write.csv(ind_miss, file.path(base, "ind_miss_output_indv2.csv"))
+write.csv(ind_het, file.path(base, "ind_het_output_indv2.csv"))  
+
+# PATCHWORK PLOT OF VARIOUS VCF FILTERED STATS
+
+library(ggplot2)
+library(patchwork)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output_indv2.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output_indv2.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output_indv2.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output_indv2.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output_indv2.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output_indv2.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output_indv2.csv"))
+
+# Quick sanity: confirm the data frames exist & have rows
+for (nm in c("var_qual","var_depth","var_miss","var_freq","ind_depth","ind_miss","ind_het")) {
+if (!exists(nm)) stop(sprintf("Object '%s' does not exist (check file paths in qc-setup).", nm))
+if (!is.data.frame(get(nm)) || nrow(get(nm)) == 0) stop(sprintf("Object '%s' has 0 rows.", nm))
+}
+
+# Create plots for each dataset
+p1 <- ggplot(var_qual, aes(QUAL)) + 
+  geom_density(alpha = .3) +  
+  theme_light() + 
+  labs(title = "Variant Quality")
+
+p2 <- ggplot(var_depth, aes(MEAN_DEPTH)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Variant Depth (mean)")
+
+p3 <- ggplot(var_miss, aes(F_MISS)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Variant Missingness (fmiss)")
+
+p4 <- ggplot(var_freq, aes(maf)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Minor Allele Frequency (MAF)")
+
+p5 <- ggplot(ind_depth, aes(MEAN_DEPTH)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Depth")
+
+p6 <- ggplot(ind_miss, aes(F_MISS)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Missingness")
+
+p7 <- ggplot(ind_het, aes(F)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Inbreeding (F)")
+
+# Compose robustly (avoids relying on | and / operators)
+panel <- patchwork::wrap_plots(list(p1, p2, p3, p4, p5, p6, p7), ncol = 2, guides = "collect")
+
+
+# Save panel as pdf file
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_indv2_stats.pdf", panel, width = 10, height = 14)
+
+# SUMMARY TABLE OF FILTERED VCF STATS
+library(dplyr)
+library(tibble)
+library(purrr)
+library(readr)
+library(knitr)
+
+# Helper function to compute full summary stats for a numeric vector
+summ <- function(x) {
+  tibble(
+    n      = sum(!is.na(x)),
+    min    = min(x, na.rm = TRUE),
+    q1     = quantile(x, 0.25, na.rm = TRUE),
+    median = median(x, na.rm = TRUE),
+    mean   = mean(x, na.rm = TRUE),
+    q3     = quantile(x, 0.75, na.rm = TRUE),
+    max    = max(x, na.rm = TRUE),
+    sd     = sd(x, na.rm = TRUE)
+  )
+}
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output_indv2.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output_indv2.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output_indv2.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output_indv2.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output_indv2.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output_indv2.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output_indv2.csv"))
+
+# Build summary for each dataset
+qc_full_summary <- bind_rows(
+  summ(var_qual$QUAL)         |> mutate(metric = "Variant Quality (QUAL)"),
+  summ(var_depth$MEAN_DEPTH)  |> mutate(metric = "Variant Depth (mean)"),
+  summ(var_miss$F_MISS)       |> mutate(metric = "Variant Missingness (fmiss)"),
+  summ(var_freq$maf)          |> mutate(metric = "Minor Allele Frequency (MAF)"),
+  summ(ind_depth$MEAN_DEPTH)       |> mutate(metric = "Individual Depth"),
+  summ(ind_miss$F_MISS)       |> mutate(metric = "Individual Missingness"),
+  summ(ind_het$F)             |> mutate(metric = "Inbreeding (F)")
+) |> 
+  relocate(metric)
+
+
+#save qc summary as tsv file
+write_tsv(qc_full_summary, file = "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_indv2_stats_summary.tsv")
+qc_full_summary
+
+qc_full_summary <- read_tsv(
+  "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_indv2_stats_summary.tsv"
+)
+
+# Rows: 7 Columns: 9
+# ── Column specification ────────────────────────────────────────────────────────
+# Delimiter: "\t"
+# chr (1): metric
+# dbl (8): n, min, q1, median, mean, q3, max, sd
+
+# ℹ Use `spec()` to retrieve the full column specification for this data.
+# ℹ Specify the column types or set `show_col_types = FALSE` to quiet this message.
+
+kable(qc_full_summary, caption = "Summary statistics for filtered by individual VCF")
+```
+
+### Filtering by Individual 1st
+
+Changing the Order: First Filtering by Individual and then Filtering by Site
+
+``` r
+# Use the filtered file from the filtering by site
+library(tidyverse)
+ids20 <- ind_miss %>%
+  filter(F_MISS > 0.2) %>%
+  arrange(desc(F_MISS))
+# ind_miss was before read into R as a data frame 
+# Save id_20 as textfile
+write_tsv(ids20, file = "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/id_20.txt")
+```
+
+``` bash
+tail -n +2 id_20.txt | cut -f 2 > ids_20.txt
+
+vcftools \
+    --gzvcf /scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/AlandIslandsHM.vcf.gz \
+    --remove id_20.txt  \
+    --recode-INFO-all \
+    --out INDMISS20   \
+    --recode
+```
+
+``` bash
+# Make variables
+SET_VCF="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.recode.vcf" 
+
+OUT="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20"
+
+# Calculate the allele frequency
+vcftools --vcf $SET_VCF --freq2 --out $OUT --max-alleles 2 
+
+# Calculate the mean depth per individual
+vcftools --vcf $SET_VCF --depth --out $OUT 
+
+# Calculate the mean depth per site
+vcftools --vcf $SET_VCF --site-mean-depth --out $OUT 
+
+# Calculate the site quality
+vcftools --vcf $SET_VCF --site-quality --out $OUT 
+
+# Calculate the proportion of missing data per individual
+vcftools --vcf $SET_VCF --missing-indv --out $OUT 
+
+# Calculate proportion of missing data per site
+vcftools --vcf $SET_VCF --missing-site --out $OUT 
+
+# Calculate the heterozygosity and inbreeding coefficient per individual
+vcftools --vcf $SET_VCF --het --out $OUT 
+```
+
+### Visualisation of Filtered by Individual 1st VCF Stats
+
+``` r
+# VISUALISATION OF THE FILTERED VCF STATS
+# R Script
+install.packages("tidyverse")
+library(tidyverse)
+library(ggplot2)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read tab files with header + 1 header line to skip
+read_tab <- function(path, col_names) {
+  vroom::vroom(path, delim = "\t", skip = 1, col_names = col_names, show_col_types = FALSE)
+}
+
+# --- Read files ---
+var_qual <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.lqual"),
+                     c("CHROM","POS","QUAL"))
+
+var_depth <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.ldepth.mean"),
+                      c("CHROM","POS","MEAN_DEPTH","VAR_DEPTH"))
+
+var_miss <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.lmiss"),
+                     c("CHR","POS","N_DATA","N_GENOTYPE_FILTERED","N_MISS","F_MISS"))
+
+# --freq2 prints allele:freq; parse the numeric frequencies correctly
+var_freq_filtered <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.frq"),
+                         c("CHR","POS","N_ALLELES","N_CHR","a1","a2"))
+
+parse_freq <- function(x) readr::parse_number(sub(".*:", "", x))
+
+var_freq <- var_freq_filtered %>%
+  mutate(freq1 = parse_freq(a1),
+         freq2 = parse_freq(a2),
+         maf   = pmin(freq1, freq2, na.rm = TRUE))
+
+ind_depth <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.idepth"),
+                      c("INDV","N_SITES","MEAN_DEPTH"))
+
+ind_miss  <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.imiss"),
+                      c("INDV","N_DATA","N_GENOTYPES_FILTERED","N_MISS","F_MISS"))
+
+ind_het   <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.het"),
+                      c("INDV","O(HOM)","E(HOM)","N_SITES","F"))  # F ~ inbreeding coefficient
+                      
+write.csv(var_qual, file.path(base, "var_qual_output_indv1.csv"))
+write.csv(var_depth, file.path(base, "var_depth_output_indv1.csv"))
+write.csv(var_miss, file.path(base, "var_miss_output_indv1.csv"))
+write.csv(var_freq, file.path(base, "var_freq_output_indv1.csv"))
+write.csv(ind_depth, file.path(base, "ind_depth_output_indv1.csv"))
+write.csv(ind_miss, file.path(base, "ind_miss_output_indv1.csv"))
+write.csv(ind_het, file.path(base, "ind_het_output_indv1.csv"))  
+
+# PATCHWORK PLOT OF VARIOUS VCF FILTERED STATS
+
+library(ggplot2)
+library(patchwork)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output_indv1.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output_indv1.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output_indv1.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output_indv1.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output_indv1.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output_indv1.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output_indv1.csv"))
+
+# Quick sanity: confirm the data frames exist & have rows
+for (nm in c("var_qual","var_depth","var_miss","var_freq","ind_depth","ind_miss","ind_het")) {
+if (!exists(nm)) stop(sprintf("Object '%s' does not exist (check file paths in qc-setup).", nm))
+if (!is.data.frame(get(nm)) || nrow(get(nm)) == 0) stop(sprintf("Object '%s' has 0 rows.", nm))
+}
+
+# Create plots for each dataset
+p1 <- ggplot(var_qual, aes(QUAL)) + 
+  geom_density(alpha = .3) +  
+  theme_light() + 
+  labs(title = "Variant Quality")
+
+p2 <- ggplot(var_depth, aes(MEAN_DEPTH)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Variant Depth (mean)")
+
+p3 <- ggplot(var_miss, aes(F_MISS)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Variant Missingness (fmiss)")
+
+p4 <- ggplot(var_freq, aes(maf)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Minor Allele Frequency (MAF)")
+
+p5 <- ggplot(ind_depth, aes(MEAN_DEPTH)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Depth")
+
+p6 <- ggplot(ind_miss, aes(F_MISS)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Missingness")
+
+p7 <- ggplot(ind_het, aes(F)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Inbreeding (F)")
+
+# Compose robustly (avoids relying on | and / operators)
+panel <- patchwork::wrap_plots(list(p1, p2, p3, p4, p5, p6, p7), ncol = 2, guides = "collect")
+
+
+# Save panel as pdf file
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_indv1_stats.pdf", panel, width = 10, height = 14)
+
+# SUMMARY TABLE OF FILTERED VCF STATS
+library(dplyr)
+library(tibble)
+library(purrr)
+library(readr)
+library(knitr)
+
+# Helper function to compute full summary stats for a numeric vector
+summ <- function(x) {
+  tibble(
+    n      = sum(!is.na(x)),
+    min    = min(x, na.rm = TRUE),
+    q1     = quantile(x, 0.25, na.rm = TRUE),
+    median = median(x, na.rm = TRUE),
+    mean   = mean(x, na.rm = TRUE),
+    q3     = quantile(x, 0.75, na.rm = TRUE),
+    max    = max(x, na.rm = TRUE),
+    sd     = sd(x, na.rm = TRUE)
+  )
+}
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output_indv1.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output_indv1.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output_indv1.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output_indv1.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output_indv1.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output_indv1.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output_indv1.csv"))
+
+# Build summary for each dataset
+qc_full_summary <- bind_rows(
+  summ(var_qual$QUAL)         |> mutate(metric = "Variant Quality (QUAL)"),
+  summ(var_depth$MEAN_DEPTH)  |> mutate(metric = "Variant Depth (mean)"),
+  summ(var_miss$F_MISS)       |> mutate(metric = "Variant Missingness (fmiss)"),
+  summ(var_freq$maf)          |> mutate(metric = "Minor Allele Frequency (MAF)"),
+  summ(ind_depth$MEAN_DEPTH)       |> mutate(metric = "Individual Depth"),
+  summ(ind_miss$F_MISS)       |> mutate(metric = "Individual Missingness"),
+  summ(ind_het$F)             |> mutate(metric = "Inbreeding (F)")
+) |> 
+  relocate(metric)
+
+
+#save qc summary as tsv file
+write_tsv(qc_full_summary, file = "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_indv1_stats_summary.tsv")
+qc_full_summary
+
+qc_full_summary <- read_tsv(
+  "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_indv1_stats_summary.tsv"
+)
+
+# Rows: 7 Columns: 9
+# ── Column specification ────────────────────────────────────────────────────────
+# Delimiter: "\t"
+# chr (1): metric
+# dbl (8): n, min, q1, median, mean, q3, max, sd
+
+# ℹ Use `spec()` to retrieve the full column specification for this data.
+# ℹ Specify the column types or set `show_col_types = FALSE` to quiet this message.
+
+kable(qc_full_summary, caption = "Summary statistics for filtered by site VCF")
+```
+
+### Filtering by Site 2nd
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=filt_site2
+#SBATCH --nodes=1
+#SBATCH --time=2:00:00
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=24gb
+#SBATCH --account=ag-demeaux
+#SBATCH --mail-type=END,FAIL
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/logs/%j_%x.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/logs/%j_%x.err
+
+module purge
+module load bio/VCFtools
+
+vcftools    --vcf /scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/INDMISS20.recode.vcf \
+    --recode-INFO-all \
+    --mac 3 \
+    --min-alleles 2 \
+    --max-alleles 2 \
+    --min-meanDP 5 \
+    --max-meanDP 40 \
+    --minDP 5 \
+    --minQ 30 \
+    --max-missing 0.9 \
+    --out /scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20 \
+    --recode \
+    --remove-indels
+
+# Make variables
+SET_VCF="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20.recode.vcf" 
+OUT="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20" 
+
+# Calculate the allele frequency
+vcftools --vcf $SET_VCF --freq2 --out $OUT --max-alleles 2 
+
+# Calculate the mean depth per individual
+vcftools --vcf $SET_VCF --depth --out $OUT 
+
+# Calculate the mean depth per site
+vcftools --vcf $SET_VCF --site-mean-depth --out $OUT 
+
+# Calculate the site quality
+vcftools --vcf $SET_VCF --site-quality --out $OUT 
+
+# Calculate the proportion of missing data per individual
+vcftools --vcf $SET_VCF --missing-indv --out $OUT 
+
+# Calculate proportion of missing data per site
+vcftools --vcf $SET_VCF --missing-site --out $OUT 
+
+# Calculate the heterozygosity and inbreeding coefficient per individual
+vcftools --vcf $SET_VCF --het --out $OUT 
+```
+
+### Visualisation of VCF Filtered by Individual 1st and Site 2nd
+
+``` r
+# VISUALISATION OF THE FILTERED VCF STATS
+# R Script
+install.packages("tidyverse")
+library(tidyverse)
+library(ggplot2)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read tab files with header + 1 header line to skip
+read_tab <- function(path, col_names) {
+  vroom::vroom(path, delim = "\t", skip = 1, col_names = col_names, show_col_types = FALSE)
+}
+
+# --- Read files ---
+var_qual <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20.lqual"),
+                     c("CHROM","POS","QUAL"))
+
+var_depth <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20.ldepth.mean"),
+                      c("CHROM","POS","MEAN_DEPTH","VAR_DEPTH"))
+
+var_miss <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20.lmiss"),
+                     c("CHR","POS","N_DATA","N_GENOTYPE_FILTERED","N_MISS","F_MISS"))
+
+# --freq2 prints allele:freq; parse the numeric frequencies correctly
+var_freq_filtered <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20.frq"),
+                         c("CHR","POS","N_ALLELES","N_CHR","a1","a2"))
+
+parse_freq <- function(x) readr::parse_number(sub(".*:", "", x))
+
+var_freq <- var_freq_filtered %>%
+  mutate(freq1 = parse_freq(a1),
+         freq2 = parse_freq(a2),
+         maf   = pmin(freq1, freq2, na.rm = TRUE))
+
+ind_depth <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20.idepth"),
+                      c("INDV","N_SITES","MEAN_DEPTH"))
+
+ind_miss  <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20.imiss"),
+                      c("INDV","N_DATA","N_GENOTYPES_FILTERED","N_MISS","F_MISS"))
+
+ind_het   <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20.het"),
+                      c("INDV","O(HOM)","E(HOM)","N_SITES","F"))  # F ~ inbreeding coefficient
+                      
+write.csv(var_qual, file.path(base, "var_qual_output_site2.csv"))
+write.csv(var_depth, file.path(base, "var_depth_output_site2.csv"))
+write.csv(var_miss, file.path(base, "var_miss_output_site2.csv"))
+write.csv(var_freq, file.path(base, "var_freq_output_site2.csv"))
+write.csv(ind_depth, file.path(base, "ind_depth_output_site2.csv"))
+write.csv(ind_miss, file.path(base, "ind_miss_output_site2.csv"))
+write.csv(ind_het, file.path(base, "ind_het_output_site2.csv"))  
+
+# PATCHWORK PLOT OF VARIOUS VCF FILTERED STATS
+
+library(ggplot2)
+library(patchwork)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output_site2.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output_site2.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output_site2.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output_site2.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output_site2.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output_site2.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output_site2.csv"))
+
+# Quick sanity: confirm the data frames exist & have rows
+for (nm in c("var_qual","var_depth","var_miss","var_freq","ind_depth","ind_miss","ind_het")) {
+if (!exists(nm)) stop(sprintf("Object '%s' does not exist (check file paths in qc-setup).", nm))
+if (!is.data.frame(get(nm)) || nrow(get(nm)) == 0) stop(sprintf("Object '%s' has 0 rows.", nm))
+}
+
+# Create plots for each dataset
+p1 <- ggplot(var_qual, aes(QUAL)) + 
+  geom_density(alpha = .3) +  
+  theme_light() + 
+  labs(title = "Variant Quality")
+
+p2 <- ggplot(var_depth, aes(MEAN_DEPTH)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Variant Depth (mean)")
+
+p3 <- ggplot(var_miss, aes(F_MISS)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Variant Missingness (fmiss)")
+
+p4 <- ggplot(var_freq, aes(maf)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Minor Allele Frequency (MAF)")
+
+p5 <- ggplot(ind_depth, aes(MEAN_DEPTH)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Depth")
+
+p6 <- ggplot(ind_miss, aes(F_MISS)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Missingness")
+
+p7 <- ggplot(ind_het, aes(F)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Inbreeding (F)")
+
+# Compose robustly
+panel <- patchwork::wrap_plots(list(p1, p2, p3, p4, p5, p6, p7), ncol = 2, guides = "collect")
+
+
+# Save panel as pdf file
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_site2_stats.pdf", panel, width = 10, height = 14)
+
+# SUMMARY TABLE OF FILTERED VCF STATS
+library(dplyr)
+library(tibble)
+library(purrr)
+library(readr)
+library(knitr)
+
+# Helper function to compute full summary stats for a numeric vector
+summ <- function(x) {
+  tibble(
+    n      = sum(!is.na(x)),
+    min    = min(x, na.rm = TRUE),
+    q1     = quantile(x, 0.25, na.rm = TRUE),
+    median = median(x, na.rm = TRUE),
+    mean   = mean(x, na.rm = TRUE),
+    q3     = quantile(x, 0.75, na.rm = TRUE),
+    max    = max(x, na.rm = TRUE),
+    sd     = sd(x, na.rm = TRUE)
+  )
+}
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output_site2.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output_site2.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output_site2.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output_site2.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output_site2.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output_site2.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output_site2.csv"))
+
+# Build summary for each dataset
+qc_full_summary <- bind_rows(
+  summ(var_qual$QUAL)         |> mutate(metric = "Variant Quality (QUAL)"),
+  summ(var_depth$MEAN_DEPTH)  |> mutate(metric = "Variant Depth (mean)"),
+  summ(var_miss$F_MISS)       |> mutate(metric = "Variant Missingness (fmiss)"),
+  summ(var_freq$maf)          |> mutate(metric = "Minor Allele Frequency (MAF)"),
+  summ(ind_depth$MEAN_DEPTH)       |> mutate(metric = "Individual Depth"),
+  summ(ind_miss$F_MISS)       |> mutate(metric = "Individual Missingness"),
+  summ(ind_het$F)             |> mutate(metric = "Inbreeding (F)")
+) |> 
+  relocate(metric)
+
+
+#save qc summary as tsv file
+write_tsv(qc_full_summary, file = "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_site2_stats_summary.tsv")
+qc_full_summary
+
+qc_full_summary <- read_tsv(
+  "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_site2_stats_summary.tsv"
+)
+
+# Rows: 7 Columns: 9
+# ── Column specification ────────────────────────────────────────────────────────
+# Delimiter: "\t"
+# chr (1): metric
+# dbl (8): n, min, q1, median, mean, q3, max, sd
+
+# ℹ Use `spec()` to retrieve the full column specification for this data.
+# ℹ Specify the column types or set `show_col_types = FALSE` to quiet this message.
+
+kable(qc_full_summary, caption = "Summary statistics for filtered by site VCF")
+```
+
+### Refiltering those individuals with empty data
+
+``` bash
+# Finding Individuals with 0 or near 0 sites
+awk 'NR>1 && $3==0 {print $1}' \
+minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20.idepth \
+> bad_ind_zero_sites.txt
+
+# Finding High-Missing Individuals
+awk 'NR>1 && $5 > 0.2 {print $1}' \
+minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20.imiss \
+> bad_ind_high_missing.txt
+
+# Combining both Lists
+cat bad_ind_zero_sites.txt bad_ind_high_missing.txt | sort | uniq > bad_ind.txt
+
+module purge
+module load bio/VCFtools
+
+# Removing bad Individuals from VCF
+vcftools \
+  --vcf /scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss90_INDMISS20.recode.vcf \
+  --remove bad_ind.txt \
+  --recode \
+  --recode-INFO-all \
+  --out PCA_ready_indfiltered
+  
+# Quick QC Check
+vcftools --vcf PCA_ready_indfiltered.recode.vcf --missing-indv --out PCA_ready_check
+vcftools --vcf PCA_ready_indfiltered.recode.vcf --depth --out PCA_ready_check
+vcftools --vcf PCA_ready_indfiltered.recode.vcf --site-mean-depth --out PCA_ready_check
+```
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=filt_indv3
+#SBATCH --nodes=1
+#SBATCH --time=2:00:00
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=24gb
+#SBATCH --account=ag-demeaux
+#SBATCH --mail-type=END,FAIL
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/logs/%j_%x.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/logs/%j_%x.err
+
+module purge
+module load bio/VCFtools
+
+# Make variables
+SET_VCF="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/PCA_ready_indfiltered.recode.vcf" 
+OUT="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/PCA_ready_indfiltered" 
+
+# Calculate the allele frequency
+vcftools --vcf $SET_VCF --freq2 --out $OUT --max-alleles 2 
+
+# Calculate the mean depth per individual
+vcftools --vcf $SET_VCF --depth --out $OUT 
+
+# Calculate the mean depth per site
+vcftools --vcf $SET_VCF --site-mean-depth --out $OUT 
+
+# Calculate the site quality
+vcftools --vcf $SET_VCF --site-quality --out $OUT 
+
+# Calculate the proportion of missing data per individual
+vcftools --vcf $SET_VCF --missing-indv --out $OUT 
+
+# Calculate proportion of missing data per site
+vcftools --vcf $SET_VCF --missing-site --out $OUT 
+
+# Calculate the heterozygosity and inbreeding coefficient per individual
+vcftools --vcf $SET_VCF --het --out $OUT 
+```
+
+### Redoing Visualisation for Re-filtered by Individual 3rd
+
+``` r
+# VISUALISATION OF THE FILTERED VCF STATS
+# R Script
+install.packages("tidyverse")
+library(tidyverse)
+library(ggplot2)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read tab files with header + 1 header line to skip
+read_tab <- function(path, col_names) {
+  vroom::vroom(path, delim = "\t", skip = 1, col_names = col_names, show_col_types = FALSE)
+}
+
+# --- Read files ---
+var_qual <- read_tab(file.path(base, "PCA_ready_indfiltered.lqual"),
+                     c("CHROM","POS","QUAL"))
+
+var_depth <- read_tab(file.path(base, "PCA_ready_indfiltered.ldepth.mean"),
+                      c("CHROM","POS","MEAN_DEPTH","VAR_DEPTH"))
+
+var_miss <- read_tab(file.path(base, "PCA_ready_indfiltered.lmiss"),
+                     c("CHR","POS","N_DATA","N_GENOTYPE_FILTERED","N_MISS","F_MISS"))
+
+# --freq2 prints allele:freq; parse the numeric frequencies correctly
+var_freq_filtered <- read_tab(file.path(base, "PCA_ready_indfiltered.frq"),
+                         c("CHR","POS","N_ALLELES","N_CHR","a1","a2"))
+
+parse_freq <- function(x) readr::parse_number(sub(".*:", "", x))
+
+var_freq <- var_freq_filtered %>%
+  mutate(freq1 = parse_freq(a1),
+         freq2 = parse_freq(a2),
+         maf   = pmin(freq1, freq2, na.rm = TRUE))
+
+ind_depth <- read_tab(file.path(base, "PCA_ready_indfiltered.idepth"),
+                      c("INDV","N_SITES","MEAN_DEPTH"))
+
+ind_miss  <- read_tab(file.path(base, "PCA_ready_indfiltered.imiss"),
+                      c("INDV","N_DATA","N_GENOTYPES_FILTERED","N_MISS","F_MISS"))
+
+ind_het   <- read_tab(file.path(base, "PCA_ready_indfiltered.het"),
+                      c("INDV","O(HOM)","E(HOM)","N_SITES","F"))  # F ~ inbreeding coefficient
+                      
+write.csv(var_qual, file.path(base, "var_qual_output_indv3.csv"))
+write.csv(var_depth, file.path(base, "var_depth_output_indv3.csv"))
+write.csv(var_miss, file.path(base, "var_miss_output_indv3.csv"))
+write.csv(var_freq, file.path(base, "var_freq_output_indv3.csv"))
+write.csv(ind_depth, file.path(base, "ind_depth_output_indv3.csv"))
+write.csv(ind_miss, file.path(base, "ind_miss_output_indv3.csv"))
+write.csv(ind_het, file.path(base, "ind_het_output_indv3.csv"))  
+
+# PATCHWORK PLOT OF VARIOUS VCF FILTERED STATS
+
+library(ggplot2)
+library(patchwork)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output_indv3.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output_indv3.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output_indv3.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output_indv3.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output_indv3.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output_indv3.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output_indv3.csv"))
+
+# Quick sanity: confirm the data frames exist & have rows
+for (nm in c("var_qual","var_depth","var_miss","var_freq","ind_depth","ind_miss","ind_het")) {
+if (!exists(nm)) stop(sprintf("Object '%s' does not exist (check file paths in qc-setup).", nm))
+if (!is.data.frame(get(nm)) || nrow(get(nm)) == 0) stop(sprintf("Object '%s' has 0 rows.", nm))
+}
+
+# Create plots for each dataset
+p1 <- ggplot(var_qual, aes(QUAL)) + 
+  geom_density(alpha = .3) +  
+  theme_light() + 
+  labs(title = "Variant Quality")
+
+p2 <- ggplot(var_depth, aes(MEAN_DEPTH)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Variant Depth (mean)")
+
+p3 <- ggplot(var_miss, aes(F_MISS)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Variant Missingness (fmiss)")
+
+p4 <- ggplot(var_freq, aes(maf)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Minor Allele Frequency (MAF)")
+
+p5 <- ggplot(ind_depth, aes(MEAN_DEPTH)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Depth")
+
+p6 <- ggplot(ind_miss, aes(F_MISS)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Missingness")
+
+p7 <- ggplot(ind_het, aes(F)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Inbreeding (F)")
+
+# Compose robustly
+panel <- patchwork::wrap_plots(list(p1, p2, p3, p4, p5, p6, p7), ncol = 2, guides = "collect")
+
+
+# Save panel as pdf file
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_indv3_stats.pdf", panel, width = 10, height = 14)
+
+# SUMMARY TABLE OF FILTERED VCF STATS
+library(dplyr)
+library(tibble)
+library(purrr)
+library(readr)
+library(knitr)
+
+# Helper function to compute full summary stats for a numeric vector
+summ <- function(x) {
+  tibble(
+    n      = sum(!is.na(x)),
+    min    = min(x, na.rm = TRUE),
+    q1     = quantile(x, 0.25, na.rm = TRUE),
+    median = median(x, na.rm = TRUE),
+    mean   = mean(x, na.rm = TRUE),
+    q3     = quantile(x, 0.75, na.rm = TRUE),
+    max    = max(x, na.rm = TRUE),
+    sd     = sd(x, na.rm = TRUE)
+  )
+}
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output_indv3.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output_indv3.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output_indv3.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output_indv3.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output_indv3.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output_indv3.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output_indv3.csv"))
+
+# Build summary for each dataset
+qc_full_summary <- bind_rows(
+  summ(var_qual$QUAL)         |> mutate(metric = "Variant Quality (QUAL)"),
+  summ(var_depth$MEAN_DEPTH)  |> mutate(metric = "Variant Depth (mean)"),
+  summ(var_miss$F_MISS)       |> mutate(metric = "Variant Missingness (fmiss)"),
+  summ(var_freq$maf)          |> mutate(metric = "Minor Allele Frequency (MAF)"),
+  summ(ind_depth$MEAN_DEPTH)       |> mutate(metric = "Individual Depth"),
+  summ(ind_miss$F_MISS)       |> mutate(metric = "Individual Missingness"),
+  summ(ind_het$F)             |> mutate(metric = "Inbreeding (F)")
+) |> 
+  relocate(metric)
+
+
+#save qc summary as tsv file
+write_tsv(qc_full_summary, file = "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_indv3_stats_summary.tsv")
+qc_full_summary
+
+qc_full_summary <- read_tsv(
+  "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/vcf_filt_indv3_stats_summary.tsv"
+)
+
+# Rows: 7 Columns: 9
+# ── Column specification ────────────────────────────────────────────────────────
+# Delimiter: "\t"
+# chr (1): metric
+# dbl (8): n, min, q1, median, mean, q3, max, sd
+
+# ℹ Use `spec()` to retrieve the full column specification for this data.
+# ℹ Specify the column types or set `show_col_types = FALSE` to quiet this message.
+
+kable(qc_full_summary, caption = "Summary statistics for refiltered by individual VCF")
+```
+
+## 13 PCA
+
+Filtering by Site 1st and Individual 2nd
+
+``` bash
+bcftools query -l minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.recode.vcf
+
+bcftools query -l minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.recode.vcf | awk -F'/' '{print $NF}' | awk -F'.sorted.bam' '{print $1}' | awk -F'_' '{print $2 "_" $1 "_" $3}' > new_sample_names_s1i2.txt
+
+bcftools query -l minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.recode.vcf | awk -F'/' '{print $NF}' | awk -F'.sorted.bam' '{print $1}' | awk -F'_' '{print $2 "_" $1 "_" $4}' > new_sample_names_s1i2.txt
+
+bcftools query -l minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.recode.vcf > old_sample_names_s1i2.txt
+
+paste old_sample_names_s1i2.txt new_sample_names_s1i2.txt > rename_samples_s1i2.txt
+
+bcftools reheader -s rename_samples_s1i2.txt minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20.recode.vcf -o minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20_shortnames.vcf
+
+bcftools query -l minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20_shortnames.vcf
+
+plink --vcf minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20_shortnames.vcf --double-id --make-bed --allow-extra-chr --out minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20
+
+plink --bfile minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20 --pca --allow-extra-chr --out minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20_pca
+```
+
+``` r
+install.packages("readr")
+install.packages("tidyverse")
+install.packages("ggrepel")
+library(tidyverse)
+library(readr)
+library(ggrepel)
+
+# --- Read eigenvectors ---
+pca <- read_table(
+    "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20_pca.eigenvec", 
+    col_names = FALSE
+    )
+
+colnames(pca) <- c("FID", "IID", paste0("PC", 1:20))
+
+# --- Create group column from the FID column ---
+pca$group <- sub("_.*", "", pca$FID)  # Everything before first underscore
+
+# Check the new column
+pca[, c("FID", "group")]
+
+
+library(RColorBrewer)
+
+group_levels <- unique(pca$group)
+
+group_colors <- setNames(
+  colorRampPalette(brewer.pal(12, "Set3"))(length(group_levels)),
+  group_levels
+)
+
+# This one is identical to the pca1_2_primulaveris.pdf one
+pca_plot <- ggplot(pca, aes(PC1, PC2, color = group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  scale_color_manual(values = group_colors) +
+  theme_bw() +
+  labs(title = "PCA PC1-PC2")
+
+# --- Save to file directly ---
+ggsave(
+  filename = "PCA_PC1_PC2.pdf",  # file name
+  plot = pca_plot,
+  width = 6,    # width in inches
+  height = 5,   # height in inches
+  dpi = 300     # resolution
+)
+
+# --- Read eigenvalues (correct file!) ---
+eigval <- scan(
+  "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/minQ30_biallelic_noINDELS_mac3_maxmiss70_INDMISS20_pca.eigenval"
+)
+
+
+# --- Compute percentage variance explained ---
+percent <- eigval / sum(eigval) * 100
+
+# --- PCA plot ---
+pca1_2 <- ggplot(pca, aes(PC1, PC2, color = group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_text_repel(aes(label = FID), size = 3) +
+  scale_color_manual(values = group_colors) +
+  theme_bw() +
+  labs(
+    title = "PCA Hypericum pulchrum 1-2",
+    x = paste0("PC1 (", round(percent[1], 2), "%)"),
+    y = paste0("PC2 (", round(percent[2], 2), "%)")
+  )
+
+pca1_3 <- ggplot(pca, aes(PC1, PC3, color = group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_text_repel(aes(label = FID), size = 3) +
+  scale_color_manual(values = group_colors) +
+  theme_bw() +
+  labs(
+    title = "PCA Hypericum pulchrum 1-3",
+    x = paste0("PC1 (", round(percent[1], 2), "%)"),
+    y = paste0("PC3 (", round(percent[3], 2), "%)")
+  )
+  
+pca2_3 <- ggplot(pca, aes(PC2, PC3, color = group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_text_repel(aes(label = FID), size = 3) +
+  scale_color_manual(values = group_colors) +
+  theme_bw() +
+  labs(
+    title = "PCA Hypericum pulchrum 2-3",
+    x = paste0("PC2 (", round(percent[2], 2), "%)"),
+    y = paste0("PC3 (", round(percent[3], 2), "%)")
+  )
+
+#save plots as pdf files
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/pdf/pca1_2_hypericumpulchrum.pdf", pca1_2, width = 8, height = 6)
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/pdf/pca1_3_hypericumpulchrum.pdf", pca1_3, width = 8, height = 6)
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/pdf/pca2_3_hypericumpulchrum.pdf", pca2_3, width = 8, height = 6)
+```
+
+Filtering by Individual 1st, Site 2nd and Re-filtering by Individual 3rd
+
+``` bash
+# 1. extract sample names
+bcftools query -l PCA_ready_indfiltered.recode.vcf > old.txt
+
+# 2. create CLEAN names (SAFE)
+awk -F'/' '{print $NF}' old.txt | \
+sed -E 's/_sorted.*$//' > new.txt
+
+# 3. safety check (MUST be empty)
+sort new.txt | uniq -d
+
+# 4. build mapping
+paste old.txt new.txt > rename.txt
+
+# 5. reheader VCF
+bcftools reheader -s rename.txt \
+  PCA_ready_indfiltered.recode.vcf \
+  -o PCA_ready_indfiltered_clean.vcf
+
+# 6. verify
+bcftools query -l PCA_ready_indfiltered_clean.vcf | head
+
+# 7. check duplicates
+bcftools query -l PCA_ready_indfiltered_clean.vcf | sort | uniq -c | sort -nr | head
+
+plink --vcf PCA_ready_indfiltered_clean.vcf \
+      --double-id \
+      --make-bed \
+      --allow-extra-chr \
+      --out PCA_ready_indfiltered_clean
+
+plink --bfile PCA_ready_indfiltered_clean \
+      --pca \
+      --allow-extra-chr \
+      --out PCA_ready_indfiltered_clean
+```
+
+Making the PCA
+
+``` r
+install.packages("readr")
+install.packages("tidyverse")
+install.packages("ggrepel")
+library(tidyverse)
+library(readr)
+library(ggrepel)
+
+# --- Read eigenvectors ---
+pca <- read_table(
+    "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/PCA_ready_indfiltered_clean.eigenvec", 
+    col_names = FALSE
+    )
+
+colnames(pca) <- c("FID", "IID", paste0("PC", 1:20))
+
+# --- Create group column from the FID column ---
+pca$group <- sub("_.*", "", pca$FID)
+
+# Check the new column
+pca[, c("FID", "group")]
+
+
+library(RColorBrewer)
+
+group_levels <- sort(unique(pca$group))
+pca$group <- factor(pca$group, levels = group_levels)
+
+group_colors <- setNames(
+  colorRampPalette(brewer.pal(12, "Set3"))(length(group_levels)),
+  group_levels
+)
+
+pca_plot <- ggplot(pca, aes(PC1, PC2, color = group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  scale_color_manual(values = group_colors) +
+  theme_bw() +
+  labs(title = "PCA PC1-PC2")
+
+# --- Save to file directly ---
+ggsave(
+  filename = "PCA_PC1_PC2.pdf",  # file name
+  plot = pca_plot,
+  width = 6,    # width in inches
+  height = 5,   # height in inches
+  dpi = 300     # resolution
+)
+
+# --- Read eigenvalues (correct file!) ---
+eigval <- scan(
+  "/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/vcftools/PCA_ready_indfiltered_clean.eigenval"
+)
+
+
+# --- Compute percentage variance explained ---
+percent <- eigval / sum(eigval) * 100
+
+# --- PCA plot ---
+pca1_2 <- ggplot(pca, aes(PC1, PC2, color = group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_text_repel(aes(label = FID), size = 3) +
+  scale_color_manual(values = group_colors) +
+  theme_bw() +
+  labs(
+    title = "PCA Hypericum pulchrum 1-2",
+    x = paste0("PC1 (", round(percent[1], 2), "%)"),
+    y = paste0("PC2 (", round(percent[2], 2), "%)")
+  )
+
+pca1_3 <- ggplot(pca, aes(PC1, PC3, color = group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_text_repel(aes(label = FID), size = 3) +
+  scale_color_manual(values = group_colors) +
+  theme_bw() +
+  labs(
+    title = "PCA Hypericum pulchrum 1-3",
+    x = paste0("PC1 (", round(percent[1], 2), "%)"),
+    y = paste0("PC3 (", round(percent[3], 2), "%)")
+  )
+  
+pca2_3 <- ggplot(pca, aes(PC2, PC3, color = group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_text_repel(aes(label = FID), size = 3) +
+  scale_color_manual(values = group_colors) +
+  theme_bw() +
+  labs(
+    title = "PCA Hypericum pulchrum 2-3",
+    x = paste0("PC2 (", round(percent[2], 2), "%)"),
+    y = paste0("PC3 (", round(percent[3], 2), "%)")
+  )
+
+#save plots as pdf files
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/pdf/pca1_2_hypericumpulchrum_indv3.pdf", pca1_2, width = 8, height = 6)
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/pdf/pca1_3_hypericumpulchrum_indv3.pdf", pca1_3, width = 8, height = 6)
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/vcf/HM/pdf/pca2_3_hypericumpulchrum_indv3.pdf", pca2_3, width = 8, height = 6)
+```
+
+## 14 Counting SNPs
+
+``` bash
+bcftools view -H name_of_last_vcf | wc -l
+```

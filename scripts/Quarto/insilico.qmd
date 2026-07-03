@@ -1,0 +1,1202 @@
+---
+title: "In Silico"
+format: html
+editor: visual
+---
+
+# RADinitio
+
+<https://catchenlab.life.illinois.edu/radinitio/>
+
+The following scripts are done on the example of the *Hypericum pulchrum* reference genome.
+
+## 1 Population Simulation
+
+Path: /scratch/PNeuhaus/PaulaNeuhaus/Scripts/radinitio_pop_10_5.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=rad_pop   
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=10G
+#SBATCH --time=120:00:00
+#SBATCH --account=ag-demeaux
+#SBATCH --mail-type=END,FAIL
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/rad_pop_%j.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/rad_pop_%j.err
+
+# Create directories
+mkdir -p /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs
+
+# Thread control
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+echo "=== Starting Population Simulation at $(date) ==="
+
+mkdir -p /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/
+
+# Run population simulation only - FIXED genome path
+radinitio --make-population \
+   --genome /scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/ref_genomes/HM/hypericumpulchrum/hypericumpulchrum_SAMEA10241452.fasta \
+   --out-dir /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/ \
+   --n-pops 10 \
+   --n-seq-indv 5
+
+if [ $? -eq 0 ]; then
+   echo "Population simulation completed successfully at $(date)"
+
+   # Check outputs
+   echo "=== Output files ==="
+   ls -lh /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/
+
+   # Check for VCF file
+   VCF_FILE="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/ref_loci_vars/ri_master.vcf.gz"
+   if [ -f "$VCF_FILE" ]; then
+       echo "✓ VCF file created: $VCF_FILE"
+       echo "  Number of variants: $(zcat $VCF_FILE 2>/dev/null | grep -v '^#' | wc -l || echo 'unable to count')"
+   else
+       echo "✗ WARNING: VCF file not found!"
+       echo "  Contents of population directory:"
+       find /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/ -type f -name "*.vcf*" 2>/dev/null || echo "  No VCF files found"
+   fi
+
+   # Check popmap
+   POPMAP_FILE="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/popmap.tsv"
+   if [ -f "$POPMAP_FILE" ]; then
+       echo "✓ Popmap file created: $POPMAP_FILE"
+       echo "  Number of individuals: $(wc -l < $POPMAP_FILE)"
+       echo "  First 5 lines:"
+       head -5 "$POPMAP_FILE"
+   else
+       echo "✗ WARNING: Popmap file not found!"
+   fi
+else
+   echo "Population simulation failed at $(date)" >&2
+   exit 1
+fi
+
+echo "=== Population Simulation Complete ==="
+```
+
+## 2 Library Simulation
+
+Path: /scratch/PNeuhaus/PaulaNeuhaus/Scripts/radinitio_lib_10_5.sh
+
+This is with the enzyme KpnI
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=rad_lib
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=400G
+#SBATCH --time=120:00:00
+#SBATCH --account=ag-demeaux
+#SBATCH --mail-type=END,FAIL
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/rad_lib_%j.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/rad_lib_%j.err
+
+# Create directories
+mkdir -p /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs
+
+# Thread control
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+echo "=== Starting Library Simulation at $(date) ==="
+
+# Check if population simulation exists
+if [ ! -d "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/msprime_vcfs/" ]; then
+   echo "ERROR: msprime_vcfs directory not found!"
+   echo "Please run the population simulation first."
+   exit 1
+fi
+
+if [ ! -f "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/ref_loci_vars/ri_master.vcf.gz" ]; then
+   echo "ERROR: Population VCF file (ri_master.vcf.gz) not found!"
+   echo "Population simulation may not have completed successfully."
+   exit 1
+fi
+
+if [ ! -f "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/popmap.tsv" ]; then
+   echo "ERROR: popmap.tsv file not found!"
+   echo "The population map file is required for the simulation."
+   exit 1
+fi
+
+# Create the output directory if it doesn't exist
+mkdir -p /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation
+
+# Run library simulation
+radinitio --make-library-seq \
+   --genome /scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/ref_genomes/HM/hypericumpulchrum/hypericumpulchrum_SAMEA10241452.fasta \
+   --out-dir /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/ \
+   --make-pop-sim-dir /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/ \
+   --library-type sdRAD \
+   --enz KpnI \
+   --coverage 20 \
+   --read-length 150 \
+   --insert-mean 350 \
+   --insert-stdev 37 \
+   --lib-bar1-len 6 \
+   --read-out-fmt fastq
+
+if [ $? -eq 0 ]; then
+   echo "Library simulation completed successfully at $(date)"
+
+   # Find and display barcode file
+   BARCODE_FILE=$(find /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/ -name "*barcode*.tsv" -o -name "*barcode*.txt" 2>/dev/null | head -1)
+
+   if [ -n "$BARCODE_FILE" ]; then
+       echo ""
+       echo "=== BARCODE FILE ==="
+       echo "Location: $BARCODE_FILE"
+       echo "Total barcodes: $(wc -l < $BARCODE_FILE)"
+       echo ""
+       echo "First 10 barcodes:"
+       head -10 "$BARCODE_FILE"
+
+       # Copy to convenient location
+       cp "$BARCODE_FILE" /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/barcodes_for_demultiplexing.tsv
+       echo ""
+       echo "✓ Barcode file copied to: /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_1/barcodes_for_demultiplexing.tsv"
+   fi
+else
+   echo "Library simulation failed at $(date)" >&2
+   exit 1
+fi
+
+echo "=== Library Simulation Complete ==="
+```
+
+Path: /scratch/PNeuhaus/PaulaNeuhaus/Scripts/radinitio_lib_10_1_PstI.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=rad_lib
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=400G
+#SBATCH --time=120:00:00
+#SBATCH --account=ag-demeaux
+#SBATCH --mail-type=END,FAIL
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/rad_lib_%j.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/rad_lib_%j.err
+
+# Create directories
+mkdir -p /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs
+
+# Thread control
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+echo "=== Starting Library Simulation at $(date) ==="
+
+mkdir -p /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5
+
+# Check if population simulation exists
+if [ ! -d "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/msprime_vcfs/" ]; then
+   echo "ERROR: msprime_vcfs directory not found!"
+   echo "Please run the population simulation first."
+   exit 1
+fi
+
+if [ ! -f "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/ref_loci_vars/ri_master.vcf.gz" ]; then
+   echo "ERROR: Population VCF file (ri_master.vcf.gz) not found!"
+   echo "Population simulation may not have completed successfully."
+   exit 1
+fi
+
+if [ ! -f "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/popmap.tsv" ]; then
+   echo "ERROR: popmap.tsv file not found!"
+   echo "The population map file is required for the simulation."
+   exit 1
+fi
+
+# Create the output directory if it doesn't exist
+mkdir -p /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/PstI/simulation
+
+# Run library simulation
+radinitio --make-library-seq \
+   --genome /scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/ref_genomes/HM/hypericumpulchrum/hypericumpulchrum_SAMEA10241452.fasta \
+   --out-dir /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/PstI/simulation/ \
+   --make-pop-sim-dir /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/ \
+   --library-type sdRAD \
+   --enz PstI \
+   --coverage 20 \
+   --read-length 150 \
+   --insert-mean 350 \
+   --insert-stdev 37 \
+   --lib-bar1-len 6 \
+   --read-out-fmt fastq
+
+if [ $? -eq 0 ]; then
+   echo "Library simulation completed successfully at $(date)"
+
+   # Find and display barcode file
+   BARCODE_FILE=$(find /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/PstI/simulation/ -name "*barcode*.tsv" -o -name "*barcode*.txt" 2>/dev/null | head -1)
+
+   if [ -n "$BARCODE_FILE" ]; then
+       echo ""
+       echo "=== BARCODE FILE ==="
+       echo "Location: $BARCODE_FILE"
+       echo "Total barcodes: $(wc -l < $BARCODE_FILE)"
+       echo ""
+       echo "First 10 barcodes:"
+       head -10 "$BARCODE_FILE"
+
+       # Copy to convenient location
+       cp "$BARCODE_FILE" /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/PstI/barcodes_for_demultiplexing.tsv
+       echo ""
+       echo "✓ Barcode file copied to: /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/PstI/barcodes_for_demultiplexing.tsv"
+   fi
+else
+   echo "Library simulation failed at $(date)" >&2
+   exit 1
+fi
+
+echo "=== Library Simulation Complete ==="
+```
+
+## 3 Mapping
+
+The mapping was done for every enzyme for 10_5 with the reference genome of *Hypericum pulchrum*
+
+Script: mapping_radinitio_KpnI.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=map_radinitio_KpnI
+#SBATCH --nodes=1
+#SBATCH --time=1:00:00
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=32gb
+#SBATCH --array=1-50
+#SBATCH --account=ag-demeaux
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/%x_%j.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/%x_%j.err
+
+# Directories
+INDIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/rad_reads"
+OUTDIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping"
+REF="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/ref_genomes/HM/hypericumpulchrum/hypericumpulchrum_SAMEA10241452.fasta"
+
+# Create output directory if needed
+mkdir -p "$OUTDIR"
+
+# Use the random 100 sample list
+SAMPLE=$(sed -n "${SLURM_ARRAY_TASK_ID}p" ${INDIR}/sample_list_10_5_new.txt)
+
+FQ1=${INDIR}/${SAMPLE}.1.fq.gz
+FQ2=${INDIR}/${SAMPLE}.2.fq.gz
+BAM=${OUTDIR}/${SAMPLE}.sorted.bam
+
+echo "Mapping sample: $SAMPLE"
+echo "FQ1: $FQ1"
+echo "FQ2: $FQ2"
+echo "Output BAM: $BAM"
+
+module purge
+module load bio/bwa-mem2/2.2.1-intel-compilers-2023.1.0
+
+bwa-mem2 mem -t 6 $REF $FQ1 $FQ2 > ${OUTDIR}/${SAMPLE}.sam
+
+
+module purge
+module load bio/SAMtools/1.19.2-GCC-13.2.0   # Pick a SAMtools version compatible with GCC
+
+samtools view -bS ${OUTDIR}/${SAMPLE}.sam | samtools sort -o $BAM -
+samtools index $BAM
+
+rm ${OUTDIR}/${SAMPLE}.sam
+```
+
+## 4 Deduplication of Mapped Reads
+
+After the mapping, the deduplication was done. Again for every enzyme from 10_5
+
+Script: dedup_radinitio_KpnI.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=dedup_radinitio
+#SBATCH --nodes=1
+#SBATCH --time=2:00:00
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=24gb
+#SBATCH --account=ag-demeaux
+#SBATCH --array=1-50
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/%x_%j_%a.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/%x_%j_%a.err
+
+module purge
+module load bio/SAMtools/1.18-GCC-12.3.0
+
+INLIST="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/rad_reads/sample_list_10_5_new.txt"
+INDIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping"
+OUTDIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup"
+
+mkdir -p $OUTDIR
+
+# Get sample name
+SAMPLE=$(sed -n "${SLURM_ARRAY_TASK_ID}p" ${INLIST})
+
+echo "Processing $SAMPLE"
+
+# Input BAM
+INBAM=${INDIR}/${SAMPLE}.sorted.bam
+
+# Intermediate + final BAMs
+NAME_SORT=${OUTDIR}/${SAMPLE}_name_sorted.bam
+FIXMATE=${OUTDIR}/${SAMPLE}_fixmate.bam
+FIXMATE_SORT=${OUTDIR}/${SAMPLE}_fixmate_sorted.bam
+DEDUP=${OUTDIR}/${SAMPLE}_sorted_dedup.bam
+STATS=${OUTDIR}/${SAMPLE}_duplicates_report.txt
+
+# Step 1: sort by name
+samtools sort -n -@ 6 -O bam -o $NAME_SORT $INBAM
+
+# Step 2: fixmate
+samtools fixmate -m -O bam $NAME_SORT $FIXMATE
+rm -f $NAME_SORT
+
+# Step 3: coordinate sort
+samtools sort -@ 6 -O bam -o $FIXMATE_SORT $FIXMATE
+rm -f $FIXMATE
+
+# Step 4: mark duplicates (remove them with -r, keep stats with -s)
+samtools markdup -r -s -@ 6 $FIXMATE_SORT $DEDUP
+rm -f $FIXMATE_SORT
+
+# Step 5: stats summary
+samtools flagstat $DEDUP > $STATS
+
+samtools index $DEDUP
+
+echo "Finished $SAMPLE"
+```
+
+## 5 (Multi)BamQC
+
+This was done for every enzyme from 10_5
+
+Script: multibamqc_KpnI.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=multibamqc_KpnI
+#SBATCH --time=1:00:00
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16gb
+#SBATCH --account=ag-demeaux
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/%x_%j.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/%x_%j.err
+
+set -euo pipefail
+
+BAM_DIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup"
+BAMQC_DIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/bamqc/"
+MULTIBAMQC_DIR="$BAMQC_DIR/multibamqc"
+
+mkdir -p "$BAMQC_DIR" "$MULTIBAMQC_DIR"
+
+# Set Java options for headless mode
+export JAVA_OPTS="-Djava.awt.headless=true"
+
+# Run Qualimap BAMQC for each sorted BAM file
+for BAM_FILE in "$BAM_DIR"/*_sorted_dedup.bam; do
+SAMPLE_NAME=$(basename "$BAM_FILE" _sorted_dedup.bam)
+QUALIMAP_OUTPUT_DIR="$BAMQC_DIR/$SAMPLE_NAME"
+
+# Define output and error log files for each sample INSIDE the loop
+SBATCH_OUTPUT_FILE="$BAMQC_DIR/${SAMPLE_NAME}_bamqc.out"
+SBATCH_ERROR_FILE="$BAMQC_DIR/${SAMPLE_NAME}_bamqc.err"
+
+echo "Running Qualimap BAMQC for $SAMPLE_NAME"
+qualimap bamqc \
+-bam "$BAM_FILE" \
+-outdir "$QUALIMAP_OUTPUT_DIR" \
+-outformat HTML \
+-outfile "${SAMPLE_NAME}_report" \
+-nw 4 \
+> "$SBATCH_OUTPUT_FILE" 2> "$SBATCH_ERROR_FILE"
+done
+
+# Prepare input groups file for multi-bamqc
+INPUT_GROUPS_FILE="$BAMQC_DIR/input_groups.txt"
+rm -f "$INPUT_GROUPS_FILE"
+
+echo "Creating input groups file for Multi-BAMQC"
+for BAMQC_OUTPUT_DIR in "$BAMQC_DIR"/*; do
+if [ -d "$BAMQC_OUTPUT_DIR" ] && [ -f "$BAMQC_OUTPUT_DIR/genome_results.txt" ]; then
+SAMPLE_NAME=$(basename "$BAMQC_OUTPUT_DIR")
+echo -e "${SAMPLE_NAME}\t${BAMQC_OUTPUT_DIR}\t1" >> "$INPUT_GROUPS_FILE"
+fi
+done
+
+# Run Qualimap Multi-BAMQC
+echo "Running Qualimap Multi-BAMQC"
+qualimap multi-bamqc \
+-d "$INPUT_GROUPS_FILE" \
+-outdir "$MULTIBAMQC_DIR" \
+-outformat PDF:HTML \
+-nw 4
+
+echo "Qualimap analysis complete. Reports saved in $MULTIBAMQC_DIR."
+```
+
+## 6 VCF Calling
+
+Make the bam_file_paths_sorted.txt from the files in the dedup directory
+
+``` bash
+find "$(pwd)" -maxdepth 1 -name "*_sorted_dedup.bam" | sort > bam_file_paths_sorted.txt
+```
+
+Script: vcf_calling_radinitio_KpnI.sh
+
+``` bash
+#!/bin/bash
+
+#SBATCH --job-name=vcf_calling_radinitio_KpnI
+#SBATCH --time=1:00:00
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16gb
+#SBATCH --account=ag-demeaux
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/%x_%j.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/%x_%j.err
+
+module purge
+module load bio/BCFtools/1.19-GCC-13.2.0
+
+# Set paths
+# Referencegenome
+REF="/scratch/PNeuhaus/PaulaNeuhaus/Output/mapping/ref_genomes/HM/hypericumpulchrum/hypericumpulchrum_SAMEA10241452.fasta"
+# List with all the paths to the .sorted.bam files
+BAMLIST="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/bam_file_paths_sorted.txt"
+# Defines Output where to put the vcf
+OUTDIR="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf"
+OUT="${OUTDIR}/KpnI.vcf.gz"
+
+mkdir -p "$OUTDIR"
+
+# Print job info to log file
+echo "Starting variant calling with bcftools" > $SLURM_JOB_ID.vcf.log
+echo "Reference Genome: $REF" >> $SLURM_JOB_ID.vcf.log
+echo "BAM list: $BAMLIST" >> $SLURM_JOB_ID.vcf.log
+echo "Output VCF: $OUT" >> $SLURM_JOB_ID.vcf.log echo "Start time: $(date)" >> $SLURM_JOB_ID.vcf.log
+
+bcftools mpileup \
+-f $REF \
+-b $BAMLIST \
+-q 20 \
+-Q 30 \
+-a AD,DP,SP \
+-Ou \
+| bcftools call \
+-m -v \
+-a GQ,GP \
+-Oz \
+-o $OUT
+
+echo "End time: $(date)" >> $SLURM_JOB_ID.vcf.log
+```
+
+## 7 Pre-Visualisation
+
+Script: pre_vis_KpnI.sh
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=vcftools_stats
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8gb
+#SBATCH --time=01:00:00
+#SBATCH --account=ag-demeaux
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/%x_%j.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/%x_%j.err
+
+set -euo pipefail
+
+# Load module
+module purge
+module load bio/VCFtools/0.1.16-GCC-11.3.0
+
+# Make variables
+SET_VCF="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/KpnI.vcf.gz"
+OUT="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcftools"
+
+mkdir -p "$OUT"
+
+echo "Starting VCFtools statistics"
+echo "VCF: $SET_VCF"
+echo "Output directory: $OUT"
+
+# Calculate the allele frequency
+vcftools --gzvcf $SET_VCF --freq2 --out $OUT --max-alleles 2
+
+# Calculate the mean depth per individual
+vcftools --gzvcf $SET_VCF --depth --out $OUT
+
+# Calculate the mean depth per site
+vcftools --gzvcf $SET_VCF --site-mean-depth --out $OUT
+
+# Calculate the site quality
+vcftools --gzvcf $SET_VCF --site-quality --out $OUT
+
+# Calculate the proportion of missing data per individual
+vcftools --gzvcf $SET_VCF --missing-indv --out $OUT
+
+# Calculate proportion of missing data per site
+vcftools --gzvcf $SET_VCF --missing-site --out $OUT
+
+# Calculate the heterozygosity and inbreeding coefficient per individual
+vcftools --gzvcf $SET_VCF --het --out $OUT
+```
+
+## 8 Visualisation and Patchwork Plots
+
+``` r
+install.packages("tidyverse")
+library(tidyverse)
+library(ggplot2)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf"
+
+# Helper to read tab files with header + 1 header line to skip
+read_tab <- function(path, col_names) {
+vroom::vroom(path, delim = "\t", skip = 1, col_names = col_names, show_col_types = FALSE)
+}
+
+# --- Read files ---
+var_qual <- read_tab(file.path(base, "vcftools.lqual"),
+c("CHROM","POS","QUAL"))
+
+var_depth <- read_tab(file.path(base, "vcftools.ldepth.mean"),
+c("CHROM","POS","MEAN_DEPTH","VAR_DEPTH"))
+
+var_miss <- read_tab(file.path(base, "vcftools.lmiss"),
+c("CHR","POS","N_DATA","N_GENOTYPE_FILTERED","N_MISS","F_MISS"))
+
+# --freq2 prints allele:freq; parse the numeric frequencies correctly
+var_freq_raw <- read_tab(file.path(base, "vcftools.frq"),
+c("CHR","POS","N_ALLELES","N_CHR","a1","a2"))
+parse_freq <- function(x) readr::parse_number(sub(".*:", "", x))
+var_freq <- var_freq_raw %>%
+mutate(freq1 = parse_freq(a1),
+freq2 = parse_freq(a2),
+maf = pmin(freq1, freq2, na.rm = TRUE))
+
+ind_depth <- read_tab(file.path(base, "vcftools.idepth"),
+c("INDV","N_SITES","MEAN_DEPTH"))
+
+ind_miss <- read_tab(file.path(base, "vcftools.imiss"),
+c("INDV","N_DATA","N_GENOTYPES_FILTERED","N_MISS","F_MISS"))
+
+ind_het <- read_tab(file.path(base, "vcftools.het"),
+c("INDV","O(HOM)","E(HOM)","N_SITES","F")) # F ~ inbreeding coefficient
+
+write.csv(var_qual, file.path(base, "var_qual_output.csv"))
+write.csv(var_depth, file.path(base, "var_depth_output.csv"))
+write.csv(var_miss, file.path(base, "var_miss_output.csv"))
+write.csv(var_freq, file.path(base, "var_freq_output.csv"))
+write.csv(ind_depth, file.path(base, "ind_depth_output.csv"))
+write.csv(ind_miss, file.path(base, "ind_miss_output.csv"))
+write.csv(ind_het, file.path(base, "ind_het_output.csv"))
+
+# Patchwork Plot
+
+library(ggplot2)
+library(patchwork)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output.csv"))
+
+# Quick sanity: confirm the data frames exist & have rows
+for (nm in c("var_qual","var_depth","var_miss","var_freq","ind_depth","ind_miss","ind_het")) {
+if (!exists(nm)) stop(sprintf("Object '%s' does not exist (check file paths in qc-setup).", nm))
+if (!is.data.frame(get(nm)) || nrow(get(nm)) == 0) stop(sprintf("Object '%s' has 0 rows.", nm))
+}
+
+# Create plots for each dataset
+p1 <- ggplot(var_qual, aes(QUAL)) +
+geom_density(alpha = .3) +
+coord_cartesian(xlim = c(0, 800)) +
+theme_light() +
+labs(title = "Variant Quality")
+
+p2 <- ggplot(var_depth, aes(MEAN_DEPTH)) +
+geom_density(alpha = .3) +
+coord_cartesian(xlim = c(0, 75)) +
+theme_light() +
+labs(title = "Variant Depth (mean)")
+
+p3 <- ggplot(var_miss, aes(F_MISS)) +
+geom_density(alpha = .3) +
+theme_light() +
+labs(title = "Variant Missingness (fmiss)")
+
+p4 <- ggplot(var_freq, aes(maf)) +
+geom_density(alpha = .3) +
+theme_light() +
+labs(title = "Minor Allele Frequency (MAF)")
+
+p5 <- ggplot(ind_depth, aes(MEAN_DEPTH)) +
+geom_histogram(bins = 50, alpha = .3) +
+theme_light() +
+labs(title = "Individual Depth")
+
+p6 <- ggplot(ind_miss, aes(F_MISS)) +
+geom_histogram(bins = 50, alpha = .3) +
+theme_light() +
+labs(title = "Individual Missingness")
+
+p7 <- ggplot(ind_het, aes(F)) +
+geom_histogram(bins = 50, alpha = .3) +
+theme_light() +
+labs(title = "Individual Inbreeding (F)")
+
+# Compose robustly (avoids relying on | and / operators)
+panel <- patchwork::wrap_plots(list(p1, p2, p3, p4, p5, p6, p7), ncol = 2, guides = "collect")
+
+
+#save panel as pdf file
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_raw_stats.pdf", panel, width = 10, height = 14)
+```
+
+## 9 Summary TSV of the Raw VCF Stats
+
+``` r
+library(dplyr)
+library(tibble)
+library(purrr)
+library(readr)
+library(knitr)
+
+# Helper function to compute full summary stats for a numeric vector
+summ <- function(x) {
+  tibble(
+    n      = sum(!is.na(x)),
+    min    = min(x, na.rm = TRUE),
+    q1     = quantile(x, 0.25, na.rm = TRUE),
+    median = median(x, na.rm = TRUE),
+    mean   = mean(x, na.rm = TRUE),
+    q3     = quantile(x, 0.75, na.rm = TRUE),
+    max    = max(x, na.rm = TRUE),
+    sd     = sd(x, na.rm = TRUE)
+  )
+}
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output.csv"))
+
+# Build summary for each dataset
+qc_full_summary <- bind_rows(
+  summ(var_qual$QUAL)         |> mutate(metric = "Variant Quality (QUAL)"),
+  summ(var_depth$MEAN_DEPTH)  |> mutate(metric = "Variant Depth (mean)"),
+  summ(var_miss$F_MISS)       |> mutate(metric = "Variant Missingness (fmiss)"),
+  summ(var_freq$maf)          |> mutate(metric = "Minor Allele Frequency (MAF)"),
+  summ(ind_depth$MEAN_DEPTH)  |> mutate(metric = "Individual Depth"),
+  summ(ind_miss$F_MISS)       |> mutate(metric = "Individual Missingness"),
+  summ(ind_het$F)             |> mutate(metric = "Inbreeding (F)")
+) |> 
+  relocate(metric)
+
+
+#save qc summary as tsv file
+write_tsv(qc_full_summary, file = "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_raw_stats_summary.tsv")
+qc_full_summary
+
+qc_full_summary <- read_tsv(
+  "scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_raw_stats_summary.tsv"
+)
+
+# Rows: 7 Columns: 9
+# ── Column specification ────────────────────────────────────────────────────────
+# Delimiter: "\t"
+# chr (1): metric
+# dbl (8): n, min, q1, median, mean, q3, max, sd
+
+# ℹ Use `spec()` to retrieve the full column specification for this data.
+# ℹ Specify the column types or set `show_col_types = FALSE` to quiet this message.
+
+kable(qc_full_summary, caption = "Summary statistics for raw VCF")
+```
+
+## 10 Filtering
+
+### Filtering by Site
+
+``` bash
+#!/bin/bash -l
+
+#SBATCH --job-name=filt_site1_KpnI
+#SBATCH --nodes=1
+#SBATCH --time=2:00:00
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=24gb
+#SBATCH --account=ag-demeaux
+#SBATCH --mail-type=END,FAIL
+#SBATCH --output=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/%j_%x.out
+#SBATCH --error=/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/logs/%j_%x.err
+
+module purge
+module load bio/VCFtools
+
+vcftools    --gzvcf /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/KpnI.vcf.gz \
+    --recode-INFO-all \
+    --mac 3 \
+    --min-alleles 2 \
+    --max-alleles 2 \
+    --min-meanDP 5 \
+    --max-meanDP 40 \
+    --minDP 5 \
+    --minQ 30 \
+    --max-missing 0.8 \
+    --out /scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered/minQ30_biallelic_noINDELS_mac3_maxmiss80 \
+    --recode \
+    --remove-indels
+
+# Make variables
+SET_VCF="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered/minQ30_biallelic_noINDELS_mac3_maxmiss80.recode.vcf" 
+OUT="/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered/minQ30_biallelic_noINDELS_mac3_maxmiss80" 
+
+# Calculate the allele frequency
+vcftools --vcf $SET_VCF --freq2 --out $OUT --max-alleles 2 
+
+# Calculate the mean depth per individual
+vcftools --vcf $SET_VCF --depth --out $OUT 
+
+# Calculate the mean depth per site
+vcftools --vcf $SET_VCF --site-mean-depth --out $OUT 
+
+# Calculate the site quality
+vcftools --vcf $SET_VCF --site-quality --out $OUT 
+
+# Calculate the proportion of missing data per individual
+vcftools --vcf $SET_VCF --missing-indv --out $OUT 
+
+# Calculate proportion of missing data per site
+vcftools --vcf $SET_VCF --missing-site --out $OUT 
+
+# Calculate the heterozygosity and inbreeding coefficient per individual
+vcftools --vcf $SET_VCF --het --out $OUT 
+```
+
+### Visualisation of Filtered by Site VCF Stats
+
+``` r
+# VISUALISATION OF THE FILTERED VCF STATS
+# R Script
+install.packages("tidyverse")
+library(tidyverse)
+library(ggplot2)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered"
+
+# Helper to read tab files with header + 1 header line to skip
+read_tab <- function(path, col_names) {
+  vroom::vroom(path, delim = "\t", skip = 1, col_names = col_names, show_col_types = FALSE)
+}
+
+# --- Read files ---
+var_qual <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss80.lqual"),
+                     c("CHROM","POS","QUAL"))
+
+var_depth <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss80.ldepth.mean"),
+                      c("CHROM","POS","MEAN_DEPTH","VAR_DEPTH"))
+
+var_miss <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss80.lmiss"),
+                     c("CHR","POS","N_DATA","N_GENOTYPE_FILTERED","N_MISS","F_MISS"))
+
+# --freq2 prints allele:freq; parse the numeric frequencies correctly
+var_freq_filtered <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss80.frq"),
+                         c("CHR","POS","N_ALLELES","N_CHR","a1","a2"))
+
+parse_freq <- function(x) readr::parse_number(sub(".*:", "", x))
+
+var_freq <- var_freq_filtered %>%
+  mutate(freq1 = parse_freq(a1),
+         freq2 = parse_freq(a2),
+         maf   = pmin(freq1, freq2, na.rm = TRUE))
+
+ind_depth <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss80.idepth"),
+                      c("INDV","N_SITES","MEAN_DEPTH"))
+
+ind_miss  <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss80.imiss"),
+                      c("INDV","N_DATA","N_GENOTYPES_FILTERED","N_MISS","F_MISS"))
+
+ind_het   <- read_tab(file.path(base, "minQ30_biallelic_noINDELS_mac3_maxmiss80.het"),
+                      c("INDV","O(HOM)","E(HOM)","N_SITES","F"))  # F ~ inbreeding coefficient
+                      
+write.csv(var_qual, file.path(base, "var_qual_output_site1.csv"))
+write.csv(var_depth, file.path(base, "var_depth_output_site1.csv"))
+write.csv(var_miss, file.path(base, "var_miss_output_site1.csv"))
+write.csv(var_freq, file.path(base, "var_freq_output_site1.csv"))
+write.csv(ind_depth, file.path(base, "ind_depth_output_site1.csv"))
+write.csv(ind_miss, file.path(base, "ind_miss_output_site1.csv"))
+write.csv(ind_het, file.path(base, "ind_het_output_site1.csv"))  
+
+# PATCHWORK PLOT OF VARIOUS VCF FILTERED STATS
+
+library(ggplot2)
+library(patchwork)
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output_site1.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output_site1.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output_site1.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output_site1.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output_site1.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output_site1.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output_site1.csv"))
+
+# Quick sanity: confirm the data frames exist & have rows
+for (nm in c("var_qual","var_depth","var_miss","var_freq","ind_depth","ind_miss","ind_het")) {
+if (!exists(nm)) stop(sprintf("Object '%s' does not exist (check file paths in qc-setup).", nm))
+if (!is.data.frame(get(nm)) || nrow(get(nm)) == 0) stop(sprintf("Object '%s' has 0 rows.", nm))
+}
+
+# Create plots for each dataset
+p1 <- ggplot(var_qual, aes(QUAL)) + 
+  geom_density(alpha = .3) +  
+  theme_light() + 
+  labs(title = "Variant Quality")
+
+p2 <- ggplot(var_depth, aes(MEAN_DEPTH)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Variant Depth (mean)")
+
+p3 <- ggplot(var_miss, aes(F_MISS)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Variant Missingness (fmiss)")
+
+p4 <- ggplot(var_freq, aes(maf)) + 
+  geom_density(alpha = .3) + 
+  theme_light() + 
+  labs(title = "Minor Allele Frequency (MAF)")
+
+p5 <- ggplot(ind_depth, aes(MEAN_DEPTH)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Depth")
+
+p6 <- ggplot(ind_miss, aes(F_MISS)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Missingness")
+
+p7 <- ggplot(ind_het, aes(F)) + 
+  geom_histogram(bins = 50, alpha = .3) + 
+  theme_light() + 
+  labs(title = "Individual Inbreeding (F)")
+
+# Compose robustly (avoids relying on | and / operators)
+panel <- patchwork::wrap_plots(list(p1, p2, p3, p4, p5, p6, p7), ncol = 2, guides = "collect")
+
+
+# Save panel as pdf file
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered/vcf_filt_site1_stats.pdf", panel, width = 10, height = 14)
+
+# SUMMARY TABLE OF FILTERED VCF STATS
+library(dplyr)
+library(tibble)
+library(purrr)
+library(readr)
+library(knitr)
+
+# Helper function to compute full summary stats for a numeric vector
+summ <- function(x) {
+  tibble(
+    n      = sum(!is.na(x)),
+    min    = min(x, na.rm = TRUE),
+    q1     = quantile(x, 0.25, na.rm = TRUE),
+    median = median(x, na.rm = TRUE),
+    mean   = mean(x, na.rm = TRUE),
+    q3     = quantile(x, 0.75, na.rm = TRUE),
+    max    = max(x, na.rm = TRUE),
+    sd     = sd(x, na.rm = TRUE)
+  )
+}
+
+# Define file paths
+base <- "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered"
+
+# Helper to read CSV files
+read_csv <- function(path) {
+  read.csv(path)
+}
+
+# --- Read files (now using the CSV output files) ---
+var_qual <- read_csv(file.path(base, "var_qual_output_site1.csv"))
+var_depth <- read_csv(file.path(base, "var_depth_output_site1.csv"))
+var_miss <- read_csv(file.path(base, "var_miss_output_site1.csv"))
+var_freq <- read_csv(file.path(base, "var_freq_output_site1.csv"))
+ind_depth <- read_csv(file.path(base, "ind_depth_output_site1.csv"))
+ind_miss <- read_csv(file.path(base, "ind_miss_output_site1.csv"))
+ind_het <- read_csv(file.path(base, "ind_het_output_site1.csv"))
+
+# Build summary for each dataset
+qc_full_summary <- bind_rows(
+  summ(var_qual$QUAL)         |> mutate(metric = "Variant Quality (QUAL)"),
+  summ(var_depth$MEAN_DEPTH)  |> mutate(metric = "Variant Depth (mean)"),
+  summ(var_miss$F_MISS)       |> mutate(metric = "Variant Missingness (fmiss)"),
+  summ(var_freq$maf)          |> mutate(metric = "Minor Allele Frequency (MAF)"),
+  summ(ind_depth$MEAN_DEPTH)       |> mutate(metric = "Individual Depth"),
+  summ(ind_miss$F_MISS)       |> mutate(metric = "Individual Missingness"),
+  summ(ind_het$F)             |> mutate(metric = "Inbreeding (F)")
+) |> 
+  relocate(metric)
+
+
+#save qc summary as tsv file
+write_tsv(qc_full_summary, file = "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered/vcf_filt_site1_stats_summary.tsv")
+qc_full_summary
+
+qc_full_summary <- read_tsv(
+  "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered/vcf_filt_site1_stats_summary.tsv"
+)
+
+# Rows: 7 Columns: 9
+# ── Column specification ────────────────────────────────────────────────────────
+# Delimiter: "\t"
+# chr (1): metric
+# dbl (8): n, min, q1, median, mean, q3, max, sd
+
+# ℹ Use `spec()` to retrieve the full column specification for this data.
+# ℹ Specify the column types or set `show_col_types = FALSE` to quiet this message.
+
+kable(qc_full_summary, caption = "Summary statistics for filtered by site VCF")
+```
+
+As the individuals have no high missingness, there was no filtering by individual needed.
+
+## 11 PCA
+
+``` bash
+bcftools query -l minQ30_biallelic_noINDELS_mac3_maxmiss80.recode.vcf
+
+bcftools query -l minQ30_biallelic_noINDELS_mac3_maxmiss80.recode.vcf | awk -F'/' '{print $NF}' | awk -F'.sorted.bam' '{print $1}' | awk -F'_' '{print $2 "_" $1 "_" $3}' > new_sample_names.txt
+
+bcftools query -l minQ30_biallelic_noINDELS_mac3_maxmiss80.recode.vcf | awk -F'/' '{print $NF}' | awk -F'.sorted.bam' '{print $1}' | awk -F'_' '{print $2 "_" $1 "_" $4}' > new_sample_names.txt
+
+bcftools query -l minQ30_biallelic_noINDELS_mac3_maxmiss80.recode.vcf > old_sample_names.txt
+
+paste old_sample_names.txt new_sample_names.txt > rename_samples.txt
+
+bcftools reheader -s rename_samples.txt minQ30_biallelic_noINDELS_mac3_maxmiss80.recode.vcf -o minQ30_biallelic_noINDELS_mac3_maxmiss80_shortnames.vcf
+
+bcftools query -l minQ30_biallelic_noINDELS_mac3_maxmiss80_shortnames.vcf
+
+plink --vcf minQ30_biallelic_noINDELS_mac3_maxmiss80_shortnames.vcf --double-id --make-bed --allow-extra-chr --out minQ30_biallelic_noINDELS_mac3_maxmiss80
+
+plink --bfile minQ30_biallelic_noINDELS_mac3_maxmiss80 --pca --allow-extra-chr --out minQ30_biallelic_noINDELS_mac3_maxmiss80_pca
+```
+
+``` r
+install.packages("readr")
+install.packages("tidyverse")
+install.packages("ggrepel")
+library(tidyverse)
+library(readr)
+library(ggrepel)
+
+# --- Read eigenvectors ---
+pca <- read_table(
+"/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered/minQ30_biallelic_noINDELS_mac3_maxmiss80_pca.eigenvec",
+col_names = FALSE
+)
+
+colnames(pca) <- c(
+  "FID",
+  "IID",
+  paste0("PC", 1:(ncol(pca)-2))
+)
+
+# --- Create clean sample IDs matching popmap.tsv ---
+pca$sample <- paste0(
+  "msp_",
+  sub("_.*", "", pca$FID)
+)
+
+# --- Create short labels like 00_msp ---
+pca$label <- paste0(
+  sub("_.*", "", pca$FID),
+  "_msp"
+)
+
+# --- Read population assignments ---
+colnames(pca) <- c(
+  "FID",
+  "IID",
+  paste0("PC", 1:(ncol(pca)-2))
+)
+
+# --- Create clean sample IDs matching popmap.tsv ---
+pca$sample <- paste0(
+  "msp_",
+  sub("_.*", "", pca$FID)
+)
+
+# --- Create short labels like 00_msp ---
+pca$label <- paste0(
+  sub("_.*", "", pca$FID),
+  "_msp"
+)
+
+popmap <- read_tsv(
+  "/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/popmap.tsv",
+  col_names = c("sample", "group")
+)
+
+# --- Merge into PCA table ---
+pca <- left_join(pca, popmap, by = "sample")
+
+# --- Colors for groups ---
+library(scales)
+
+group_levels <- unique(pca$group)
+
+group_colors <- setNames(
+  hue_pal()(length(group_levels)),
+  group_levels
+)
+
+pca_plot <- ggplot(pca, aes(PC1, PC2, color = group)) +
+geom_point(size = 3, alpha = 0.8) +
+scale_color_manual(values = group_colors) +
+theme_bw() +
+labs(title = "PCA PC1-PC2")
+
+# --- Save to file directly ---
+ggsave(
+filename = "PCA_PC1_PC2.pdf", # file name
+plot = pca_plot,
+width = 6, # width in inches
+height = 5, # height in inches
+dpi = 300 # resolution
+)
+
+# --- Read eigenvalues (correct file!) ---
+eigval <- scan(
+"/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered/minQ30_biallelic_noINDELS_mac3_maxmiss80_pca.eigenval"
+)
+
+
+# --- Compute percentage variance explained ---
+percent <- eigval / sum(eigval) * 100
+
+# --- PCA plot ---
+pca1_2 <- ggplot(pca, aes(PC1, PC2, color = group)) +
+geom_point(size = 3, alpha = 0.8) +
+geom_text_repel(
+aes(label = label),
+size = 3,
+max.overlaps = Inf
+) +
+scale_color_manual(values = group_colors) +
+theme_bw() +
+labs(
+title = "PCA Hypericum pulchrum 1-2",
+x = paste0("PC1 (", round(percent[1], 2), "%)"),
+y = paste0("PC2 (", round(percent[2], 2), "%)")
+)
+
+pca1_3 <- ggplot(pca, aes(PC1, PC3, color = group)) +
+geom_point(size = 3, alpha = 0.8) +
+geom_text_repel(
+aes(label = label),
+size = 3,
+max.overlaps = Inf
+) +
+scale_color_manual(values = group_colors) +
+theme_bw() +
+labs(
+title = "PCA Hypericum pulchrum 1-3",
+x = paste0("PC1 (", round(percent[1], 2), "%)"),
+y = paste0("PC3 (", round(percent[3], 2), "%)")
+)
+
+pca2_3 <- ggplot(pca, aes(PC2, PC3, color = group)) +
+geom_point(size = 3, alpha = 0.8) +
+geom_text_repel(
+aes(label = label),
+size = 3,
+max.overlaps = Inf
+) +
+scale_color_manual(values = group_colors) +
+theme_bw() +
+labs(
+title = "PCA Hypericum pulchrum 2-3",
+x = paste0("PC2 (", round(percent[2], 2), "%)"),
+y = paste0("PC3 (", round(percent[3], 2), "%)")
+)
+
+#save plots as pdf files
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered/pca1_2_hypericumpulchrum.pdf", pca1_2, width = 8, height = 6)
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered/pca1_3_hypericumpulchrum.pdf", pca1_3, width = 8, height = 6)
+ggsave("/scratch/PNeuhaus/PaulaNeuhaus/Output/radinitio/hypericumpulchrum/population/10_5/simulation/mapping/dedup/vcf/vcf_filtered/pca2_3_hypericumpulchrum.pdf", pca2_3, width = 8, height = 6)
+```
+
+## 12 Counting SNPs
+
+``` bash
+bcftools view -H name_of_last_vcf | wc -l
+```
