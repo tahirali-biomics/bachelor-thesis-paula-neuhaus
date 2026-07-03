@@ -1,0 +1,44 @@
+---
+title: "RADseq analysis workflows – Paula Neuhaus"
+---
+
+## Overview
+
+This repository contains Quarto-documented scripts developed during the Bachelor's thesis of **Paula Neuhaus** at the **Institute for Plant Sciences, University of Cologne**.
+
+The workflows document RADseq-based genomic analyses of *Hypericum pulchrum*, with the aim of processing sequencing data, generating high-quality SNP datasets, and analysing spatial genomic structure among populations.
+
+## Workflows
+
+### RADseq sequencing batch 1
+
+- [HM_hpulchrum_batch1.qmd](scripts/Quarto/HM_hpulchrum_batch1.qmd)
+
+Workflow for the first RADseq sequencing batch, including demultiplexing, read quality control, trimming, mapping, duplicate removal, BAM quality assessment, variant calling, SNP filtering, PCA, and SNP summaries.
+
+### RADseq sequencing batch 2
+
+- [HM_hpulchrum_batch2.qmd](scripts/Quarto/HM_hpulchrum_batch2.qmd)
+
+Workflow for the additional RADseq sequencing batch, analysed with the same general processing framework to extend the population genomic dataset.
+
+### RADinitio restriction-enzyme simulation
+
+- [RADinitio_simulation.qmd](scripts/Quarto/RADinitio_simulation.qmd)
+
+Simulation workflow using RADinitio to evaluate the RADseq restriction enzyme used in the experiment, **KpnI**, in comparison with alternative enzyme choices tested in silico. The workflow includes population simulation, RAD library simulation, mapping, duplicate removal, BAM/VCF quality assessment, filtering, PCA, and SNP counting.
+
+## Main analysis components
+
+- RADseq demultiplexing and barcode handling
+- Read trimming and quality control
+- Mapping to the *H. pulchrum* reference genome
+- BAM processing and duplicate removal
+- Variant calling and VCF summary statistics
+- SNP filtering and dataset preparation
+- PCA-based assessment of genomic structure
+- RADinitio-based restriction-enzyme evaluation
+
+## Repository purpose
+
+The repository provides a reproducible record of the scripts used to process RADseq data and assess genomic differentiation and spatial population structure in *Hypericum pulchrum*.

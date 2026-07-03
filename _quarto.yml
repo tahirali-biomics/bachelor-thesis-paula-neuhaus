@@ -1,0 +1,22 @@
+project:
+  type: website
+  output-dir: docs
+
+website:
+  title: "RADseq analysis workflows – Paula Neuhaus"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - href: scripts/Quarto/HM_hpulchrum_batch1.qmd
+        text: Batch 1
+      - href: scripts/Quarto/HM_hpulchrum_batch2.qmd
+        text: Batch 2
+      - href: scripts/Quarto/RADinitio_simulation.qmd
+        text: RADinitio simulation
+
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    theme: cosmo

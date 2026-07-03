@@ -8,3 +8,6 @@ __pycache__/
 # Large or temporary files
 *.tmp
 *.log
+
+/.quarto/
+**/*.quarto_ipynb
